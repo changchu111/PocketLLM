@@ -6,6 +6,11 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		B045BBAC2F8274B3003A5122 /* llama.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = B045BBAA2F827442003A5122 /* llama.xcframework */; };
+		B045BBAD2F8274B3003A5122 /* llama.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = B045BBAA2F827442003A5122 /* llama.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		B045BB6E2F8236F7003A5122 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -23,10 +28,25 @@
 		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		B045BBAE2F8274B3003A5122 /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				B045BBAD2F8274B3003A5122 /* llama.xcframework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		B045BB602F8236F6003A5122 /* PocketLLM.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PocketLLM.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B045BB6D2F8236F7003A5122 /* PocketLLMTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PocketLLMTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		B045BB772F8236F7003A5122 /* PocketLLMUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PocketLLMUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		B045BBAA2F827442003A5122 /* llama.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = llama.xcframework; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -52,6 +72,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				B045BBAC2F8274B3003A5122 /* llama.xcframework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -75,6 +96,7 @@
 		B045BB572F8236F6003A5122 = {
 			isa = PBXGroup;
 			children = (
+				B045BBAA2F827442003A5122 /* llama.xcframework */,
 				B045BB622F8236F6003A5122 /* PocketLLM */,
 				B045BB702F8236F7003A5122 /* PocketLLMTests */,
 				B045BB7A2F8236F7003A5122 /* PocketLLMUITests */,
@@ -102,6 +124,7 @@
 				B045BB5C2F8236F6003A5122 /* Sources */,
 				B045BB5D2F8236F6003A5122 /* Frameworks */,
 				B045BB5E2F8236F6003A5122 /* Resources */,
+				B045BBAE2F8274B3003A5122 /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
