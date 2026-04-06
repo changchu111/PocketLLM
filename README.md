@@ -90,3 +90,7 @@ cp -R llama.cpp/build-apple/llama.xcframework \
 ## 致谢
 
 - `llama.cpp`: https://github.com/ggml-org/llama.cpp
+
+## License
+
+MIT License. See `LICENSE`.
