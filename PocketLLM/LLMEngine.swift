@@ -1,6 +1,13 @@
 import Foundation
 import Combine
 
+#if canImport(UIKit)
+import UIKit
+typealias PlatformImage = UIImage
+#else
+typealias PlatformImage = Any
+#endif
+
 @MainActor
 final class ChatViewModel: ObservableObject {
     @Published var messages: [ChatMessage] = [
@@ -13,6 +20,7 @@ final class ChatViewModel: ObservableObject {
     @Published var isGenerating = false
     @Published var errorMessage: String?
     @Published var streamingAssistantID: UUID?
+    @Published var pendingImage: PlatformImage?
 
     private let modelStore: ModelStore
     private let settings: GenerationSettings
@@ -25,15 +33,38 @@ final class ChatViewModel: ObservableObject {
         self.settings = settings
     }
 
+    func setPendingImage(_ image: PlatformImage) {
+        pendingImage = image
+    }
+
+    func clearPendingImage() {
+        pendingImage = nil
+    }
+
     func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        let image = pendingImage
+        guard !text.isEmpty || image != nil else { return }
         draft = ""
         errorMessage = nil
 
         stop()
 
-        messages.append(ChatMessage(role: .user, text: text))
+        var attachments: [ChatAttachment] = []
+        #if canImport(UIKit)
+        if let image {
+            do {
+                let attachment = try persistImageAttachment(image)
+                attachments = [attachment]
+            } catch {
+                errorMessage = "Failed to attach image: \(error.localizedDescription)"
+            }
+        }
+        #endif
+
+        let userMessageID = UUID()
+        messages.append(ChatMessage(id: userMessageID, role: .user, text: text, attachments: attachments))
+        pendingImage = nil
         let promptSnapshot = messages // exclude the streaming placeholder
 
         let assistantID = UUID()
@@ -42,6 +73,14 @@ final class ChatViewModel: ObservableObject {
 
         guard let modelURL = modelStore.activeModelURL() else {
             errorMessage = "Select or download a model first."
+            isGenerating = false
+            return
+        }
+
+        let imageURL = attachments.first(where: { $0.type == .image })?.url
+        let mmprojURL = imageURL != nil ? modelStore.activeMMProjURL() : nil
+        if imageURL != nil, mmprojURL == nil {
+            errorMessage = "Download and select an mmproj model first (Models → mmproj-F16.gguf)."
             isGenerating = false
             return
         }
@@ -58,11 +97,12 @@ final class ChatViewModel: ObservableObject {
                     topP: settings.topP,
                     presencePenalty: settings.presencePenalty,
                     frequencyPenalty: settings.frequencyPenalty,
+                    mmprojURL: mmprojURL,
                     seed: settings.seed
                 )
 
-                let prompt = PromptBuilder.buildPrompt(from: promptSnapshot)
-                try await engine.generate(prompt: prompt, maxNewTokens: settings.maxNewTokens) { token in
+                let prompt = PromptBuilder.buildPrompt(from: promptSnapshot, activeImageMessageID: imageURL != nil ? userMessageID : nil)
+                try await engine.generate(prompt: prompt, imageURL: imageURL, maxNewTokens: settings.maxNewTokens) { token in
                     if let idx = self.messages.firstIndex(where: { $0.id == assistantID }) {
                         // Streaming: do NOT trim trailing newlines, otherwise list formatting breaks
                         // whenever a newline arrives as a standalone token.
@@ -104,6 +144,41 @@ final class ChatViewModel: ObservableObject {
         ]
         errorMessage = nil
         streamingAssistantID = nil
+        pendingImage = nil
+    }
+
+    private func persistImageAttachment(_ image: UIImage) throws -> ChatAttachment {
+        let uuid = UUID().uuidString
+        let filename = "\(uuid).jpg"
+        let url = FileLocations.attachmentFileURL(filename: filename)
+
+        // Multimodal image tokens grow quickly with resolution.
+        // Keep images smaller on iPhone to avoid huge mtmd/KV allocations.
+        let scaled = image.scaledDown(maxDimension: 384)
+        guard let data = scaled.jpegData(compressionQuality: 0.85) else {
+            throw NSError(domain: "PocketLLM", code: 2, userInfo: [NSLocalizedDescriptionKey: "JPEG encoding failed"])
+        }
+
+        try data.write(to: url, options: .atomic)
+        try url.excludeFromBackup()
+
+        return ChatAttachment(type: .image, localPath: url.path)
+    }
+}
+
+private extension UIImage {
+    func scaledDown(maxDimension: CGFloat) -> UIImage {
+        let size = self.size
+        let maxSide = max(size.width, size.height)
+        guard maxSide > maxDimension, maxSide > 0 else { return self }
+
+        let scale = maxDimension / maxSide
+        let newSize = CGSize(width: size.width * scale, height: size.height * scale)
+
+        let renderer = UIGraphicsImageRenderer(size: newSize)
+        return renderer.image { _ in
+            self.draw(in: CGRect(origin: .zero, size: newSize))
+        }
     }
 }
 
@@ -116,6 +191,7 @@ actor LLMEngine {
     private var loadedTopP: Float?
     private var loadedPresencePenalty: Float?
     private var loadedFrequencyPenalty: Float?
+    private var loadedMMProjPath: String?
     private var loadedSeed: UInt32?
 
     func loadIfNeeded(
@@ -126,13 +202,16 @@ actor LLMEngine {
         topP: Float,
         presencePenalty: Float,
         frequencyPenalty: Float,
+        mmprojURL: URL?,
         seed: UInt32
     ) async throws {
         let path = modelURL.path
+        let mmprojPath = mmprojURL?.path
 
         let needsReload = (ctx == nil)
             || (loadedModelPath != path)
             || (loadedContextLength != contextLength)
+            || (loadedMMProjPath != mmprojPath)
 
         if needsReload {
             ctx = nil
@@ -143,6 +222,7 @@ actor LLMEngine {
             loadedTopP = nil
             loadedPresencePenalty = nil
             loadedFrequencyPenalty = nil
+            loadedMMProjPath = nil
             loadedSeed = nil
 
             ctx = try LlamaContext.create_context(
@@ -153,6 +233,7 @@ actor LLMEngine {
                 topP: topP,
                 presencePenalty: presencePenalty,
                 frequencyPenalty: frequencyPenalty,
+                mmprojPath: mmprojPath,
                 seed: seed
             )
 
@@ -163,6 +244,7 @@ actor LLMEngine {
             loadedTopP = topP
             loadedPresencePenalty = presencePenalty
             loadedFrequencyPenalty = frequencyPenalty
+            loadedMMProjPath = mmprojPath
             loadedSeed = seed
             return
         }
@@ -191,10 +273,10 @@ actor LLMEngine {
         }
     }
 
-    func generate(prompt: String, maxNewTokens: Int32, onToken: @MainActor @Sendable (String) async -> Void) async throws {
+    func generate(prompt: String, imageURL: URL?, maxNewTokens: Int32, onToken: @MainActor @Sendable (String) async -> Void) async throws {
         guard let ctx else { throw NSError(domain: "PocketLLM", code: 1, userInfo: [NSLocalizedDescriptionKey: "Model not loaded"]) }
         do {
-            try await ctx.completion_init(text: prompt, maxNewTokens: maxNewTokens)
+            try await ctx.completion_init(text: prompt, imageURL: imageURL, maxNewTokens: maxNewTokens)
 
             // Stop sequences for ChatML-style templates.
             // Prevent the model from continuing into the next <|im_start|>user/... turn.
@@ -279,7 +361,7 @@ actor LLMEngine {
 }
 
 enum PromptBuilder {
-    static func buildPrompt(from messages: [ChatMessage]) -> String {
+    static func buildPrompt(from messages: [ChatMessage], activeImageMessageID: UUID? = nil) -> String {
         // Minimal ChatML-like prompt that works reasonably across many instruct-ish models.
         // If you later switch to a strictly-instruct GGUF, you can replace this with that model's template.
         let recent = messages.filter { $0.role != .system }
@@ -289,7 +371,20 @@ enum PromptBuilder {
         for m in recent {
             switch m.role {
             case .user:
-                out += "<|im_start|>user\n\(m.text)\n<|im_end|>\n"
+                let hasImage = m.attachments.contains(where: { $0.type == .image })
+                let userText: String
+                if hasImage, m.id == activeImageMessageID {
+                    // Single-image mode: only the current image-bearing user message gets a media marker.
+                    let marker = "<__media__>"
+                    userText = m.text.isEmpty ? marker : marker + "\n" + m.text
+                } else if hasImage {
+                    // Preserve chat continuity without injecting stale media markers from history.
+                    let placeholder = "[Image attached previously]"
+                    userText = m.text.isEmpty ? placeholder : placeholder + "\n" + m.text
+                } else {
+                    userText = m.text
+                }
+                out += "<|im_start|>user\n\(userText)\n<|im_end|>\n"
             case .assistant:
                 out += "<|im_start|>assistant\n\(m.text)\n<|im_end|>\n"
             case .system:

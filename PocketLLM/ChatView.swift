@@ -1,10 +1,16 @@
 import SwiftUI
 
+#if canImport(UIKit)
+import UIKit
+#endif
+
 struct ChatView: View {
     @ObservedObject var viewModel: ChatViewModel
     @EnvironmentObject private var app: AppModel
 
     @FocusState private var isComposerFocused: Bool
+
+    @State private var showingCamera = false
 
     private var visibleMessages: [ChatMessage] {
         viewModel.messages.filter { $0.role != .system }
@@ -46,14 +52,30 @@ struct ChatView: View {
                         .padding(.bottom, 6)
                 }
 
-                ComposerBar(
-                    text: $viewModel.draft,
-                    isGenerating: viewModel.isGenerating,
-                    onSend: { viewModel.send() },
-                    onStop: { viewModel.stop() },
-                    isFocused: $isComposerFocused
-                )
-                .padding(.horizontal)
+                VStack(spacing: 8) {
+                    #if canImport(UIKit)
+                    if let image = viewModel.pendingImage {
+                        AttachmentChip(image: image) {
+                            viewModel.clearPendingImage()
+                        }
+                        .padding(.horizontal)
+                    }
+                    #endif
+
+                    ComposerBar(
+                        text: $viewModel.draft,
+                        hasAttachment: viewModel.pendingImage != nil,
+                        isGenerating: viewModel.isGenerating,
+                        onCamera: {
+                            isComposerFocused = false
+                            showingCamera = true
+                        },
+                        onSend: { viewModel.send() },
+                        onStop: { viewModel.stop() },
+                        isFocused: $isComposerFocused
+                    )
+                    .padding(.horizontal)
+                }
                 .padding(.vertical, 10)
                 .background(.bar)
             }
@@ -69,6 +91,15 @@ struct ChatView: View {
                 }
             }
         }
+        .fullScreenCover(isPresented: $showingCamera) {
+            CameraScreen(
+                onClose: { showingCamera = false },
+                onImage: { image in
+                    viewModel.setPendingImage(image)
+                    showingCamera = false
+                }
+            )
+        }
     }
 }
 
@@ -81,11 +112,18 @@ private struct MessageRow: View {
             if message.role == .user {
                 Spacer(minLength: 48)
             }
-            MessageText(role: message.role, text: message.text, isStreaming: isStreaming)
-                .padding(12)
-                .background(message.role == .user ? Color.accentColor : Color(uiColor: .secondarySystemBackground))
-                .foregroundStyle(message.role == .user ? Color.white : Color.primary)
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            VStack(alignment: .leading, spacing: 8) {
+                if !message.attachments.isEmpty {
+                    AttachmentsView(attachments: message.attachments)
+                }
+                if !message.text.isEmpty {
+                    MessageText(role: message.role, text: message.text, isStreaming: isStreaming)
+                }
+            }
+            .padding(12)
+            .background(message.role == .user ? Color.accentColor : Color(uiColor: .secondarySystemBackground))
+            .foregroundStyle(message.role == .user ? Color.white : Color.primary)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .overlay {
                     if message.role != .user {
                         RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -94,6 +132,26 @@ private struct MessageRow: View {
                 }
             if message.role != .user {
                 Spacer(minLength: 48)
+            }
+        }
+    }
+}
+
+private struct AttachmentsView: View {
+    let attachments: [ChatAttachment]
+
+    var body: some View {
+        ForEach(attachments) { attachment in
+            switch attachment.type {
+            case .image:
+                if let image = UIImage(contentsOfFile: attachment.localPath) {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(maxWidth: 240, maxHeight: 240)
+                        .clipped()
+                        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
             }
         }
     }
@@ -113,15 +171,59 @@ private struct MessageText: View {
     }
 }
 
+private struct AttachmentChip: View {
+    let image: UIImage
+    let onRemove: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFill()
+                .frame(width: 36, height: 36)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+            Text("Photo")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+
+            Text("optimized")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Spacer()
+
+            Button(action: onRemove) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 44)
+        .background(.thinMaterial, in: Capsule())
+    }
+}
+
 private struct ComposerBar: View {
     @Binding var text: String
+    let hasAttachment: Bool
     let isGenerating: Bool
+    let onCamera: () -> Void
     let onSend: () -> Void
     let onStop: () -> Void
     @FocusState.Binding var isFocused: Bool
 
     var body: some View {
         HStack(spacing: 10) {
+            Button(action: onCamera) {
+                Image(systemName: "camera")
+                    .font(.system(size: 18, weight: .semibold))
+                    .frame(width: 44, height: 44)
+            }
+            .buttonStyle(.plain)
+
             TextField("Message", text: $text, axis: .vertical)
                 .lineLimit(1...6)
                 .textFieldStyle(.roundedBorder)
@@ -141,12 +243,16 @@ private struct ComposerBar: View {
                     Image(systemName: "arrow.up")
                         .foregroundStyle(.white)
                         .padding(10)
-                        .background(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? Color.gray : Color.accentColor)
+                        .background(canSend ? Color.accentColor : Color.gray)
                         .clipShape(Circle())
                 }
-                .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(!canSend)
                 .accessibilityLabel("Send")
             }
         }
+    }
+
+    private var canSend: Bool {
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || hasAttachment
     }
 }

@@ -18,6 +18,16 @@ struct ModelsView: View {
                     }
                 }
 
+                Section("Active mmproj") {
+                    if let activeID = modelStore.activeMMProjID,
+                       let active = modelStore.installed.first(where: { $0.id == activeID }) {
+                        Text(active.name)
+                    } else {
+                        Text("No mmproj selected")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 Section("Installed") {
                     if modelStore.installed.isEmpty {
                         Text("No installed models")
@@ -25,6 +35,7 @@ struct ModelsView: View {
                     }
 
                     ForEach(modelStore.installed) { model in
+                        let isMMProj = model.filename.lowercased().contains("mmproj")
                         HStack {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(model.name)
@@ -33,7 +44,7 @@ struct ModelsView: View {
                                     .foregroundStyle(.secondary)
                             }
                             Spacer()
-                            if modelStore.activeModelID == model.id {
+                            if (!isMMProj && modelStore.activeModelID == model.id) || (isMMProj && modelStore.activeMMProjID == model.id) {
                                 Text("Selected")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
@@ -41,7 +52,11 @@ struct ModelsView: View {
                         }
                         .contentShape(Rectangle())
                         .onTapGesture {
-                            modelStore.setActiveModel(model)
+                            if isMMProj {
+                                modelStore.setActiveMMProj(model)
+                            } else {
+                                modelStore.setActiveModel(model)
+                            }
                         }
                         .swipeActions {
                             Button(role: .destructive) {
@@ -65,7 +80,11 @@ struct ModelsView: View {
                                 if modelStore.installed.contains(where: { $0.id == model.id }) {
                                     Button("Select") {
                                         if let installed = modelStore.installed.first(where: { $0.id == model.id }) {
-                                            modelStore.setActiveModel(installed)
+                                            if installed.filename.lowercased().contains("mmproj") {
+                                                modelStore.setActiveMMProj(installed)
+                                            } else {
+                                                modelStore.setActiveModel(installed)
+                                            }
                                         }
                                     }
                                 } else {

@@ -28,6 +28,10 @@ final class ModelStore: ObservableObject {
         didSet { UserDefaults.standard.set(activeModelID, forKey: Self.activeModelKey) }
     }
 
+    @Published var activeMMProjID: String? {
+        didSet { UserDefaults.standard.set(activeMMProjID, forKey: Self.activeMMProjKey) }
+    }
+
     @Published var downloadState: [String: DownloadState] = [:]
 
     struct DownloadState: Equatable {
@@ -43,9 +47,11 @@ final class ModelStore: ObservableObject {
     }
 
     private static let activeModelKey = "PocketLLM.activeModelID"
+    private static let activeMMProjKey = "PocketLLM.activeMMProjID"
 
     init() {
         self.activeModelID = UserDefaults.standard.string(forKey: Self.activeModelKey)
+        self.activeMMProjID = UserDefaults.standard.string(forKey: Self.activeMMProjKey)
         refreshInstalled()
         loadCatalog()
     }
@@ -55,8 +61,17 @@ final class ModelStore: ObservableObject {
         return installed.first(where: { $0.id == activeModelID })?.localURL
     }
 
+    func activeMMProjURL() -> URL? {
+        guard let activeMMProjID else { return nil }
+        return installed.first(where: { $0.id == activeMMProjID })?.localURL
+    }
+
     func setActiveModel(_ model: ModelDescriptor) {
         activeModelID = model.id
+    }
+
+    func setActiveMMProj(_ model: ModelDescriptor) {
+        activeMMProjID = model.id
     }
 
     func refreshInstalled() {
@@ -78,6 +93,10 @@ final class ModelStore: ObservableObject {
             if let activeModelID, installed.contains(where: { $0.id == activeModelID }) == false {
                 self.activeModelID = nil
             }
+
+            if let activeMMProjID, installed.contains(where: { $0.id == activeMMProjID }) == false {
+                self.activeMMProjID = nil
+            }
         } catch {
             installed = []
         }
@@ -89,6 +108,9 @@ final class ModelStore: ObservableObject {
         refreshInstalled()
         if activeModelID == model.id {
             activeModelID = nil
+        }
+        if activeMMProjID == model.id {
+            activeMMProjID = nil
         }
     }
 
@@ -164,7 +186,14 @@ final class ModelStore: ObservableObject {
             source: .remote(url: URL(string: "https://hf-mirror.com/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf")!)
         )
 
-        catalog = [qwen]
+        let mmproj = ModelDescriptor(
+            id: "mmproj-F16.gguf",
+            name: "Qwen3.5 mmproj (F16)",
+            filename: "mmproj-F16.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/unsloth/Qwen3.5-2B-GGUF/resolve/main/mmproj-F16.gguf")!)
+        )
+
+        catalog = [qwen, mmproj]
     }
 
 }

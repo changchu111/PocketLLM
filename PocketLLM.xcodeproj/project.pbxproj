@@ -46,7 +46,7 @@
 		B045BB602F8236F6003A5122 /* PocketLLM.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = PocketLLM.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		B045BB6D2F8236F7003A5122 /* PocketLLMTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PocketLLMTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		B045BB772F8236F7003A5122 /* PocketLLMUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = PocketLLMUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		B045BBAA2F827442003A5122 /* llama.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = llama.xcframework; sourceTree = "<group>"; };
+		B045BBAA2F827442003A5122 /* llama.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = Frameworks/llama.xcframework; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -423,6 +423,9 @@
 				DEVELOPMENT_TEAM = BLUW6B2YY6;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "用于拍照并将图片发送给本地模型";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "用于从相册选择图片并将图片发送给本地模型";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "用于保存你拍摄的图片（可选）";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -455,6 +458,9 @@
 				DEVELOPMENT_TEAM = BLUW6B2YY6;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "用于拍照并将图片发送给本地模型";
+				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "用于从相册选择图片并将图片发送给本地模型";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "用于保存你拍摄的图片（可选）";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

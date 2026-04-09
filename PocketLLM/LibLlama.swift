@@ -1,10 +1,20 @@
 import Foundation
+import Foundation
 import llama
+
+#if canImport(UIKit)
+import UIKit
+#endif
 
 enum LlamaError: Error {
     case couldNotInitializeContext
     case decodeFailed(Int32)
     case promptTooLong(promptTokens: Int32, contextLength: Int32)
+    case visionNotAvailable
+    case imageLoadFailed
+    case mtmdInitFailed
+    case mtmdTokenizeFailed(Int32)
+    case mtmdEvalFailed(Int32)
 }
 
 extension LlamaError: LocalizedError {
@@ -16,6 +26,16 @@ extension LlamaError: LocalizedError {
             return "llama_decode failed (code: \(code))."
         case .promptTooLong(let promptTokens, let contextLength):
             return "Prompt too long (\(promptTokens) tokens) for context length \(contextLength). Clear chat or increase context length."
+        case .visionNotAvailable:
+            return "Vision is not available. Select an mmproj model and try again."
+        case .imageLoadFailed:
+            return "Failed to load the selected image."
+        case .mtmdInitFailed:
+            return "Failed to initialize multimodal context (mmproj)."
+        case .mtmdTokenizeFailed(let code):
+            return "Failed to tokenize multimodal prompt (code: \(code))."
+        case .mtmdEvalFailed(let code):
+            return "Failed to evaluate multimodal prompt (code: \(code))."
         }
     }
 }
@@ -24,6 +44,7 @@ actor LlamaContext {
     private var model: OpaquePointer
     private var context: OpaquePointer
     private var vocab: OpaquePointer
+    private var mtmd: OpaquePointer?
     private var sampling: UnsafeMutablePointer<llama_sampler>
     private var batch: llama_batch
     private var batchCapacity: Int32
@@ -36,6 +57,8 @@ actor LlamaContext {
     var n_len: Int32 = 1024
     var n_cur: Int32 = 0
     var n_decode: Int32 = 0
+
+    private var maxNewTokensRemaining: Int32 = 0
 
     private var shouldStop: Bool = false
 
@@ -58,9 +81,10 @@ actor LlamaContext {
         batch.n_tokens += 1
     }
 
-    init(model: OpaquePointer, context: OpaquePointer, contextLength: Int32, temperature: Float, topK: Int32, topP: Float, presencePenalty: Float, frequencyPenalty: Float, seed: UInt32) {
+    init(model: OpaquePointer, context: OpaquePointer, mtmd: OpaquePointer?, contextLength: Int32, temperature: Float, topK: Int32, topP: Float, presencePenalty: Float, frequencyPenalty: Float, seed: UInt32) {
         self.model = model
         self.context = context
+        self.mtmd = mtmd
         self.tokens_list = []
         self.batchCapacity = max(512, contextLength)
         self.batch = llama_batch_init(self.batchCapacity, 0, 1)
@@ -80,12 +104,15 @@ actor LlamaContext {
     deinit {
         llama_sampler_free(sampling)
         llama_batch_free(batch)
+        if let mtmd {
+            mtmd_free(mtmd)
+        }
         llama_model_free(model)
         llama_free(context)
         llama_backend_free()
     }
 
-    static func create_context(path: String, contextLength: Int32, temperature: Float, topK: Int32, topP: Float, presencePenalty: Float, frequencyPenalty: Float, seed: UInt32) throws -> LlamaContext {
+    static func create_context(path: String, contextLength: Int32, temperature: Float, topK: Int32, topP: Float, presencePenalty: Float, frequencyPenalty: Float, mmprojPath: String?, seed: UInt32) throws -> LlamaContext {
         llama_backend_init()
         var model_params = llama_model_default_params()
 
@@ -104,6 +131,12 @@ actor LlamaContext {
 
         var ctx_params = llama_context_default_params()
         ctx_params.n_ctx = UInt32(max(256, contextLength))
+        // Multimodal image decode (mtmd) needs a larger u-batch than the default 512,
+        // but using full context length can blow up Metal memory on iPhone.
+        // Cap to a safer value and rely on smaller images to keep image token count manageable.
+        let multimodalBatchCap = min(max(768, contextLength / 4), 1024)
+        ctx_params.n_batch = UInt32(multimodalBatchCap)
+        ctx_params.n_ubatch = UInt32(multimodalBatchCap)
         ctx_params.n_threads       = Int32(n_threads)
         ctx_params.n_threads_batch = Int32(n_threads)
 
@@ -113,9 +146,22 @@ actor LlamaContext {
             throw LlamaError.couldNotInitializeContext
         }
 
+        var mtmdCtx: OpaquePointer?
+        if let mmprojPath {
+            var mparams = mtmd_context_params_default()
+            mparams.use_gpu = true
+            mparams.print_timings = false
+            mparams.n_threads = Int32(n_threads)
+            mtmdCtx = mtmd_init_from_file(mmprojPath, model, mparams)
+            if mtmdCtx == nil {
+                throw LlamaError.mtmdInitFailed
+            }
+        }
+
         return LlamaContext(
             model: model,
             context: context,
+            mtmd: mtmdCtx,
             contextLength: Int32(ctx_params.n_ctx),
             temperature: temperature,
             topK: topK,
@@ -188,14 +234,21 @@ actor LlamaContext {
         shouldStop = true
     }
 
-    func completion_init(text: String, maxNewTokens: Int32) throws {
+    func completion_init(text: String, imageURL: URL?, maxNewTokens: Int32) throws {
         shouldStop = false
         is_done = false
         n_decode = 0
 
+        maxNewTokensRemaining = max(0, maxNewTokens)
+
         // Important for M-RoPE models (e.g. Qwen): positions must be monotonic.
         // Since PocketLLM rebuilds the full prompt each send, clear KV cache here.
         llama_memory_clear(llama_get_memory(context), true)
+
+        if let imageURL {
+            try completion_init_mtmd(text: text, imageURL: imageURL)
+            return
+        }
 
         tokens_list = tokenize(text: text, add_bos: true)
         temporary_invalid_cchars = []
@@ -235,19 +288,76 @@ actor LlamaContext {
         n_cur = batch.n_tokens
     }
 
+    private func completion_init_mtmd(text: String, imageURL: URL) throws {
+        guard let mtmd else {
+            throw LlamaError.visionNotAvailable
+        }
+
+        #if canImport(UIKit)
+        let bitmap = mtmd_helper_bitmap_init_from_file(mtmd, imageURL.path)
+        guard let bitmap else {
+            throw LlamaError.imageLoadFailed
+        }
+        defer { mtmd_bitmap_free(bitmap) }
+
+        guard let chunks = mtmd_input_chunks_init() else {
+            throw LlamaError.mtmdInitFailed
+        }
+        defer { mtmd_input_chunks_free(chunks) }
+
+        var inputText = mtmd_input_text(text: nil, add_special: true, parse_special: true)
+
+        let resTok: Int32 = text.withCString { cstr in
+            inputText.text = cstr
+            var bitmaps: [OpaquePointer?] = [bitmap]
+            return bitmaps.withUnsafeMutableBufferPointer { buf in
+                let bmpPtr = buf.baseAddress!
+                return mtmd_tokenize(mtmd, chunks, &inputText, bmpPtr, 1)
+            }
+        }
+        if resTok != 0 {
+            throw LlamaError.mtmdTokenizeFailed(resTok)
+        }
+
+        var newNPast: llama_pos = 0
+        let resEval = mtmd_helper_eval_chunks(
+            mtmd,
+            context,
+            chunks,
+            0,
+            0,
+            Int32(llama_n_batch(context)),
+            true,
+            &newNPast
+        )
+        if resEval != 0 {
+            throw LlamaError.mtmdEvalFailed(resEval)
+        }
+
+        // Continue generation positions from evaluated prompt positions.
+        n_cur = Int32(newNPast)
+        temporary_invalid_cchars = []
+
+        let n_ctx = Int32(llama_n_ctx(context))
+        n_len = min(n_ctx, n_cur + max(1, maxNewTokensRemaining))
+        #else
+        throw LlamaError.visionNotAvailable
+        #endif
+    }
+
     func completion_loop() -> String {
         if shouldStop {
             is_done = true
             return ""
         }
 
-        // If decode failed earlier, avoid sampling (llama.cpp will assert on null logits).
-        if batch.n_tokens == 0 {
+        if maxNewTokensRemaining == 0 {
             is_done = true
             return ""
         }
 
-        let new_token_id = llama_sampler_sample(sampling, context, batch.n_tokens - 1)
+        let new_token_id = llama_sampler_sample(sampling, context, -1)
+        llama_sampler_accept(sampling, new_token_id)
 
         if llama_vocab_is_eog(vocab, new_token_id) || n_cur == n_len {
             is_done = true
@@ -276,6 +386,7 @@ actor LlamaContext {
 
         n_decode += 1
         n_cur += 1
+        maxNewTokensRemaining -= 1
 
         if llama_decode(context, batch) != 0 {
             print("failed to evaluate llama")
