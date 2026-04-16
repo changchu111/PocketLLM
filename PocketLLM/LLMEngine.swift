@@ -10,12 +10,12 @@ typealias PlatformImage = Any
 
 @MainActor
 final class ChatViewModel: ObservableObject {
-    @Published var messages: [ChatMessage] = [
-        ChatMessage(
-            role: .system,
-            text: "You are a helpful assistant. Reply in Markdown. Use explicit line breaks: put each bullet/list item on its own line. Do not output <think> blocks."
-        )
+    static let defaultSystemPrompt = "You are a helpful assistant. Reply in Markdown. Use explicit line breaks: put each bullet/list item on its own line. Do not output <think> blocks."
+    static let defaultMessages: [ChatMessage] = [
+        ChatMessage(role: .system, text: defaultSystemPrompt)
     ]
+
+    @Published var messages: [ChatMessage]
     @Published var draft: String = ""
     @Published var isGenerating = false
     @Published var errorMessage: String?
@@ -24,13 +24,24 @@ final class ChatViewModel: ObservableObject {
 
     private let modelStore: ModelStore
     private let settings: GenerationSettings
+    private let sessionStore: SessionStore
     private let engine = LLMEngine()
 
     private var generationTask: Task<Void, Never>?
+    private var cancellables = Set<AnyCancellable>()
 
-    init(modelStore: ModelStore, settings: GenerationSettings) {
+    init(modelStore: ModelStore, settings: GenerationSettings, sessionStore: SessionStore) {
         self.modelStore = modelStore
         self.settings = settings
+        self.sessionStore = sessionStore
+        self.messages = sessionStore.messages
+
+        $messages
+            .dropFirst()
+            .sink { [weak self] messages in
+                self?.sessionStore.updateMessages(messages)
+            }
+            .store(in: &cancellables)
     }
 
     func setPendingImage(_ image: PlatformImage) {
@@ -48,8 +59,15 @@ final class ChatViewModel: ObservableObject {
         draft = ""
         errorMessage = nil
 
-        stop()
+        let previousGenerationTask = generationTask
+        previousGenerationTask?.cancel()
+        generationTask = nil
+        isGenerating = false
+        streamingAssistantID = nil
 
+        // Single-image mode: each new image starts a fresh visual context.
+        // Keep only the system prompt to avoid carrying prior image-heavy history
+        // into the next multimodal prompt, which quickly blows up token/memory usage.
         var attachments: [ChatAttachment] = []
         #if canImport(UIKit)
         if let image {
@@ -89,6 +107,9 @@ final class ChatViewModel: ObservableObject {
 
         generationTask = Task { @MainActor in
             do {
+                await engine.stop()
+                await previousGenerationTask?.value
+
                 try await engine.loadIfNeeded(
                     modelURL: modelURL,
                     contextLength: settings.contextLength,
@@ -101,7 +122,11 @@ final class ChatViewModel: ObservableObject {
                     seed: settings.seed
                 )
 
-                let prompt = PromptBuilder.buildPrompt(from: promptSnapshot, activeImageMessageID: imageURL != nil ? userMessageID : nil)
+        let prompt = PromptBuilder.buildPrompt(
+            from: promptSnapshot,
+            activeImageMessageID: imageURL != nil ? userMessageID : nil,
+            maxRecentRounds: 2
+        )
                 try await engine.generate(prompt: prompt, imageURL: imageURL, maxNewTokens: settings.maxNewTokens) { token in
                     if let idx = self.messages.firstIndex(where: { $0.id == assistantID }) {
                         // Streaming: do NOT trim trailing newlines, otherwise list formatting breaks
@@ -136,15 +161,12 @@ final class ChatViewModel: ObservableObject {
 
     func clearChat() {
         stop()
-        messages = [
-            ChatMessage(
-                role: .system,
-                text: "You are a helpful assistant. Reply in Markdown. Use explicit line breaks: put each bullet/list item on its own line. Do not output <think> blocks."
-            )
-        ]
+        messages = Self.defaultMessages
         errorMessage = nil
         streamingAssistantID = nil
         pendingImage = nil
+        sessionStore.reset(messages: messages)
+        Task { await engine.unload() }
     }
 
     private func persistImageAttachment(_ image: UIImage) throws -> ChatAttachment {
@@ -154,6 +176,8 @@ final class ChatViewModel: ObservableObject {
 
         // Multimodal image tokens grow quickly with resolution.
         // Keep images smaller on iPhone to avoid huge mtmd/KV allocations.
+        // Keep multimodal images small enough so visual tokens fit in a single batch on-device.
+        // This is a stability tradeoff for iPhone memory / mtmd batching.
         let scaled = image.scaledDown(maxDimension: 384)
         guard let data = scaled.jpegData(compressionQuality: 0.85) else {
             throw NSError(domain: "PocketLLM", code: 2, userInfo: [NSLocalizedDescriptionKey: "JPEG encoding failed"])
@@ -214,16 +238,7 @@ actor LLMEngine {
             || (loadedMMProjPath != mmprojPath)
 
         if needsReload {
-            ctx = nil
-            loadedModelPath = nil
-            loadedContextLength = nil
-            loadedTemperature = nil
-            loadedTopK = nil
-            loadedTopP = nil
-            loadedPresencePenalty = nil
-            loadedFrequencyPenalty = nil
-            loadedMMProjPath = nil
-            loadedSeed = nil
+            unload()
 
             ctx = try LlamaContext.create_context(
                 path: path,
@@ -290,7 +305,7 @@ actor LLMEngine {
 
             while await !ctx.is_done {
                 try Task.checkCancellation()
-                let token = await ctx.completion_loop()
+                let token = try await ctx.completion_loop()
                 if !token.isEmpty {
                     pending += token
 
@@ -315,12 +330,13 @@ actor LLMEngine {
                 }
             }
 
-            // Flush remaining content, trimming any stop artifacts.
+            // Flush remaining content exactly once, trimming any stop artifacts.
             if !pending.isEmpty {
                 let cleaned = Self.trimStopArtifacts(pending)
                 if !cleaned.isEmpty {
                     await onToken(cleaned)
                 }
+                pending = ""
             }
             await ctx.clear()
         } catch {
@@ -358,17 +374,43 @@ actor LLMEngine {
     func stop() async {
         await ctx?.requestStop()
     }
+
+    func unload() {
+        ctx = nil
+        loadedModelPath = nil
+        loadedContextLength = nil
+        loadedTemperature = nil
+        loadedTopK = nil
+        loadedTopP = nil
+        loadedPresencePenalty = nil
+        loadedFrequencyPenalty = nil
+        loadedMMProjPath = nil
+        loadedSeed = nil
+    }
 }
 
 enum PromptBuilder {
-    static func buildPrompt(from messages: [ChatMessage], activeImageMessageID: UUID? = nil) -> String {
-        // Minimal ChatML-like prompt that works reasonably across many instruct-ish models.
-        // If you later switch to a strictly-instruct GGUF, you can replace this with that model's template.
-        let recent = messages.filter { $0.role != .system }
-        let system = messages.first(where: { $0.role == .system })?.text ?? "You are a helpful assistant."
+    static func buildPrompt(from messages: [ChatMessage], activeImageMessageID: UUID? = nil, maxRecentRounds: Int = 3) -> String {
+        let system = messages.first(where: { $0.role == .system })?.text ?? ChatViewModel.defaultSystemPrompt
+        let rounds = ConversationContextBuilder.rounds(from: messages)
+        let currentUserText = rounds.last?.user.text ?? ""
 
-        var out = "<|im_start|>system\n\(system)\n<|im_end|>\n"
-        for m in recent {
+        let recentRounds = Array(rounds.suffix(maxRecentRounds))
+        let relatedSummary = ConversationContextBuilder.relatedHistorySummary(
+            allRounds: rounds,
+            currentQuery: currentUserText,
+            recentRoundsCount: recentRounds.count,
+            maxItems: 3
+        )
+
+        var enrichedSystem = system
+        if !relatedSummary.isEmpty {
+            enrichedSystem += "\n\nRelevant context from earlier in this session:\n\(relatedSummary)"
+        }
+
+        var out = "<|im_start|>system\n\(enrichedSystem)\n<|im_end|>\n"
+        for round in recentRounds {
+            let m = round.user
             switch m.role {
             case .user:
                 let hasImage = m.attachments.contains(where: { $0.type == .image })
@@ -385,9 +427,10 @@ enum PromptBuilder {
                     userText = m.text
                 }
                 out += "<|im_start|>user\n\(userText)\n<|im_end|>\n"
-            case .assistant:
-                out += "<|im_start|>assistant\n\(m.text)\n<|im_end|>\n"
-            case .system:
+                if let assistant = round.assistant {
+                    out += "<|im_start|>assistant\n\(assistant.text)\n<|im_end|>\n"
+                }
+            default:
                 break
             }
         }
@@ -395,6 +438,104 @@ enum PromptBuilder {
         // To avoid emitting think tokens in the visible transcript, we prompt with an empty think block.
         out += "<|im_start|>assistant\n<think>\n\n</think>\n\n"
         return out
+    }
+}
+
+private enum ConversationContextBuilder {
+    struct Round {
+        let user: ChatMessage
+        let assistant: ChatMessage?
+    }
+
+    struct ScoredRound {
+        let round: Round
+        let score: Int
+    }
+
+    static func rounds(from messages: [ChatMessage]) -> [Round] {
+        let convo = messages.filter { $0.role != .system }
+        var rounds: [Round] = []
+        var currentUser: ChatMessage?
+        var currentAssistant: ChatMessage?
+
+        for message in convo {
+            switch message.role {
+            case .user:
+                if let currentUser {
+                    rounds.append(Round(user: currentUser, assistant: currentAssistant))
+                }
+                currentUser = message
+                currentAssistant = nil
+            case .assistant:
+                currentAssistant = message
+            case .system:
+                break
+            }
+        }
+
+        if let currentUser {
+            rounds.append(Round(user: currentUser, assistant: currentAssistant))
+        }
+
+        return rounds
+    }
+
+    static func relatedHistorySummary(allRounds: [Round], currentQuery: String, recentRoundsCount: Int, maxItems: Int) -> String {
+        let olderRounds = Array(allRounds.dropLast(recentRoundsCount))
+        guard !olderRounds.isEmpty else { return "" }
+
+        let queryTerms = importantTerms(from: currentQuery)
+        var scored: [ScoredRound] = []
+        for round in olderRounds {
+            let value = score(round: round, queryTerms: queryTerms)
+            if value > 0 {
+                scored.append(ScoredRound(round: round, score: value))
+            }
+        }
+
+        let ranked = scored
+            .sorted { lhs, rhs in
+                if lhs.score == rhs.score {
+                    return lhs.round.user.createdAt > rhs.round.user.createdAt
+                }
+                return lhs.score > rhs.score
+            }
+            .prefix(maxItems)
+
+        let lines = ranked.map { item -> String in
+            let user = compact(item.round.user.text)
+            let assistant = compact(item.round.assistant?.text ?? "")
+            if assistant.isEmpty {
+                return "- Earlier user ask: \(user)"
+            }
+            return "- Earlier related turn: User asked \"\(user)\"; assistant answered \"\(assistant)\""
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
+    private static func importantTerms(from text: String) -> Set<String> {
+        let stopwords: Set<String> = ["the","a","an","and","or","to","of","in","on","for","with","is","are","was","were","be","this","that","it","i","you","he","she","they","we","我","你","他","她","它","我们","你们","他们","的","了","和","是","在","就","都","而","及","与","着","或","一个","可以","请","帮我","一下"]
+        let lowered = text.lowercased()
+        let tokens = lowered.split { !$0.isLetter && !$0.isNumber }
+        return Set(tokens.map(String.init).filter { $0.count >= 2 && !stopwords.contains($0) })
+    }
+
+    private static func compact(_ text: String, maxLength: Int = 120) -> String {
+        let singleLine = text.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+        if singleLine.count <= maxLength { return singleLine }
+        let end = singleLine.index(singleLine.startIndex, offsetBy: maxLength)
+        return String(singleLine[..<end]) + "…"
+    }
+
+    private static func score(round: Round, queryTerms: Set<String>) -> Int {
+        let userText = round.user.text
+        let assistantText = round.assistant?.text ?? ""
+        let haystack = userText + " " + assistantText
+        let terms = importantTerms(from: haystack)
+        let overlap = queryTerms.intersection(terms).count
+        let imageBonus = round.user.attachments.isEmpty ? 0 : 1
+        return (overlap * 5) + imageBonus
     }
 }
 

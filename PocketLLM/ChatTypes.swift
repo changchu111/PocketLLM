@@ -26,7 +26,7 @@ struct ChatAttachment: Identifiable, Equatable, Codable {
     }
 }
 
-struct ChatMessage: Identifiable, Equatable {
+struct ChatMessage: Identifiable, Equatable, Codable {
     let id: UUID
     let role: ChatRole
     var text: String

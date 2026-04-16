@@ -2,6 +2,11 @@ import Foundation
 import Combine
 
 struct ModelDescriptor: Identifiable, Equatable {
+    enum Kind: String, Equatable {
+        case model
+        case mmproj
+    }
+
     enum Source: Equatable {
         case remote(url: URL)
         case localFile(url: URL)
@@ -10,12 +15,23 @@ struct ModelDescriptor: Identifiable, Equatable {
     let id: String
     var name: String
     var filename: String
+    var kind: Kind
+    var pairedMMProjID: String?
     var source: Source
 
-    init(id: String, name: String, filename: String, source: Source) {
+    init(
+        id: String,
+        name: String,
+        filename: String,
+        kind: Kind = .model,
+        pairedMMProjID: String? = nil,
+        source: Source
+    ) {
         self.id = id
         self.name = name
         self.filename = filename
+        self.kind = kind
+        self.pairedMMProjID = pairedMMProjID
         self.source = source
     }
 }
@@ -67,11 +83,21 @@ final class ModelStore: ObservableObject {
     }
 
     func setActiveModel(_ model: ModelDescriptor) {
+        guard model.kind == .model else { return }
         activeModelID = model.id
     }
 
     func setActiveMMProj(_ model: ModelDescriptor) {
+        guard model.kind == .mmproj else { return }
         activeMMProjID = model.id
+    }
+
+    func clearActiveModel() {
+        activeModelID = nil
+    }
+
+    func clearActiveMMProj() {
+        activeMMProjID = nil
     }
 
     func refreshInstalled() {
@@ -82,12 +108,7 @@ final class ModelStore: ObservableObject {
                 .sorted { $0.lastPathComponent < $1.lastPathComponent }
 
             installed = urls.map { url in
-                ModelDescriptor(
-                    id: url.lastPathComponent,
-                    name: url.deletingPathExtension().lastPathComponent,
-                    filename: url.lastPathComponent,
-                    source: .localFile(url: url)
-                )
+                descriptorForLocalFile(url)
             }
 
             if let activeModelID, installed.contains(where: { $0.id == activeModelID }) == false {
@@ -115,6 +136,10 @@ final class ModelStore: ObservableObject {
     }
 
     func download(_ model: ModelDescriptor) {
+        downloadSingle(model)
+    }
+
+    private func downloadSingle(_ model: ModelDescriptor) {
         guard case let .remote(url) = model.source else { return }
         let destination = FileLocations.modelFileURL(filename: model.filename)
 
@@ -177,23 +202,95 @@ final class ModelStore: ObservableObject {
         catalog.insert(model, at: 0)
     }
 
+    private func descriptorForLocalFile(_ url: URL) -> ModelDescriptor {
+        let filename = url.lastPathComponent
+        if let catalogModel = catalog.first(where: { $0.filename == filename || $0.id == filename }) {
+            return ModelDescriptor(
+                id: catalogModel.id,
+                name: catalogModel.name,
+                filename: catalogModel.filename,
+                kind: catalogModel.kind,
+                pairedMMProjID: catalogModel.pairedMMProjID,
+                source: .localFile(url: url)
+            )
+        }
+
+        let isMMProj = filename.lowercased().contains("mmproj")
+        return ModelDescriptor(
+            id: filename,
+            name: url.deletingPathExtension().lastPathComponent,
+            filename: filename,
+            kind: isMMProj ? .mmproj : .model,
+            source: .localFile(url: url)
+        )
+    }
+
     private func loadCatalog() {
         // Default catalog (safe mirror link)
         let qwen = ModelDescriptor(
             id: "Qwen3.5-2B-Q4_K_M.gguf",
             name: "Qwen3.5-2B (Q4_K_M)",
             filename: "Qwen3.5-2B-Q4_K_M.gguf",
+            pairedMMProjID: "mmproj-F16.gguf",
             source: .remote(url: URL(string: "https://hf-mirror.com/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf")!)
         )
 
-        let mmproj = ModelDescriptor(
+        let qwenMMProj = ModelDescriptor(
             id: "mmproj-F16.gguf",
             name: "Qwen3.5 mmproj (F16)",
             filename: "mmproj-F16.gguf",
+            kind: .mmproj,
             source: .remote(url: URL(string: "https://hf-mirror.com/unsloth/Qwen3.5-2B-GGUF/resolve/main/mmproj-F16.gguf")!)
         )
 
-        catalog = [qwen, mmproj]
+        let miniCPM = ModelDescriptor(
+            id: "MiniCPM-V-4_5-Q4_K_M.gguf",
+            name: "MiniCPM-V 4.5 (Q4_K_M)",
+            filename: "MiniCPM-V-4_5-Q4_K_M.gguf",
+            pairedMMProjID: "mmproj-model-f16.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/openbmb/MiniCPM-V-4_5-gguf/resolve/main/MiniCPM-V-4_5-Q4_K_M.gguf")!)
+        )
+
+        let miniCPMQ40 = ModelDescriptor(
+            id: "MiniCPM-V-4_5-Q4_0.gguf",
+            name: "MiniCPM-V 4.5 (Q4_0)",
+            filename: "MiniCPM-V-4_5-Q4_0.gguf",
+            pairedMMProjID: "mmproj-model-f16.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/openbmb/MiniCPM-V-4_5-gguf/resolve/main/MiniCPM-V-4_5-Q4_0.gguf")!)
+        )
+
+        let miniCPM41 = ModelDescriptor(
+            id: "MiniCPM4.1-8B-Q4_K_M.gguf",
+            name: "MiniCPM4.1-8B (Q4_K_M)",
+            filename: "MiniCPM4.1-8B-Q4_K_M.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/openbmb/MiniCPM4.1-8B-GGUF/resolve/main/MiniCPM4.1-8B-Q4_K_M.gguf")!)
+        )
+
+        let miniCPMV4 = ModelDescriptor(
+            id: "MiniCPM-V4-Q4_K_M.gguf",
+            name: "MiniCPM-V4 (Q4_K_M)",
+            filename: "MiniCPM-V4-Q4_K_M.gguf",
+            pairedMMProjID: "MiniCPM-V4-mmproj-model-f16.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/openbmb/MiniCPM-V-4-gguf/resolve/main/ggml-model-Q4_K_M.gguf")!)
+        )
+
+        let miniCPMV4MMProj = ModelDescriptor(
+            id: "MiniCPM-V4-mmproj-model-f16.gguf",
+            name: "MiniCPM-V4 mmproj (F16)",
+            filename: "MiniCPM-V4-mmproj-model-f16.gguf",
+            kind: .mmproj,
+            source: .remote(url: URL(string: "https://hf-mirror.com/openbmb/MiniCPM-V-4-gguf/resolve/main/mmproj-model-f16.gguf")!)
+        )
+
+        let miniCPMMMProj = ModelDescriptor(
+            id: "mmproj-model-f16.gguf",
+            name: "MiniCPM-V 4.5 mmproj (F16)",
+            filename: "mmproj-model-f16.gguf",
+            kind: .mmproj,
+            source: .remote(url: URL(string: "https://hf-mirror.com/openbmb/MiniCPM-V-4_5-gguf/resolve/main/mmproj-model-f16.gguf")!)
+        )
+
+        catalog = [qwen, qwenMMProj, miniCPM, miniCPMQ40, miniCPM41, miniCPMV4, miniCPMV4MMProj, miniCPMMMProj]
     }
 
 }

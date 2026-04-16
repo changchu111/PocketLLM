@@ -131,10 +131,15 @@ actor LlamaContext {
 
         var ctx_params = llama_context_default_params()
         ctx_params.n_ctx = UInt32(max(256, contextLength))
-        // Multimodal image decode (mtmd) needs a larger u-batch than the default 512,
-        // but using full context length can blow up Metal memory on iPhone.
-        // Cap to a safer value and rely on smaller images to keep image token count manageable.
-        let multimodalBatchCap = min(max(768, contextLength / 4), 1024)
+        // For mtmd/Qwen image decode, splitting one image across multiple ubatches can cause
+        // non-consecutive position errors. Use a larger ubatch for multimodal contexts so a
+        // typical 384px image stays within a single image batch.
+        let multimodalBatchCap: Int32
+        if mmprojPath != nil {
+            multimodalBatchCap = 1024
+        } else {
+            multimodalBatchCap = 768
+        }
         ctx_params.n_batch = UInt32(multimodalBatchCap)
         ctx_params.n_ubatch = UInt32(multimodalBatchCap)
         ctx_params.n_threads       = Int32(n_threads)
@@ -149,7 +154,12 @@ actor LlamaContext {
         var mtmdCtx: OpaquePointer?
         if let mmprojPath {
             var mparams = mtmd_context_params_default()
-            mparams.use_gpu = true
+            let modelFilename = URL(fileURLWithPath: path).lastPathComponent.lowercased()
+            let useCPUForMMProj = modelFilename.contains("minicpm-v-4_5")
+
+            // MiniCPM-V 4.5 projector is too large for stable Metal allocation on iPhone.
+            // Keep MiniCPM-V4 and Qwen mmproj on GPU, but force only MiniCPM-V 4.5 mmproj to CPU.
+            mparams.use_gpu = !useCPUForMMProj
             mparams.print_timings = false
             mparams.n_threads = Int32(n_threads)
             mtmdCtx = mtmd_init_from_file(mmprojPath, model, mparams)
@@ -271,21 +281,28 @@ actor LlamaContext {
             print("warning: required KV cache may exceed n_ctx")
         }
 
-        batchClear()
-        for i1 in 0..<tokens_list.count {
-            let i = Int(i1)
-            batchAdd(tokens_list[i], Int32(i), [0], false)
-        }
-        batch.logits[Int(batch.n_tokens) - 1] = 1
+        let maxBatchTokens = max(1, Int(llama_n_batch(context)))
+        var offset = 0
 
-        let ret = llama_decode(context, batch)
-        if ret != 0 {
-            is_done = true
-            print("llama_decode() failed, ret = \(ret)")
-            throw LlamaError.decodeFailed(ret)
-        }
+        while offset < tokens_list.count {
+            let end = min(offset + maxBatchTokens, tokens_list.count)
 
-        n_cur = batch.n_tokens
+            batchClear()
+            for i in offset..<end {
+                let needsLogits = (i == tokens_list.count - 1)
+                batchAdd(tokens_list[i], Int32(i), [0], needsLogits)
+            }
+
+            let ret = llama_decode(context, batch)
+            if ret != 0 {
+                is_done = true
+                print("llama_decode() failed, ret = \(ret)")
+                throw LlamaError.decodeFailed(ret)
+            }
+
+            offset = end
+            n_cur = Int32(end)
+        }
     }
 
     private func completion_init_mtmd(text: String, imageURL: URL) throws {
@@ -345,7 +362,7 @@ actor LlamaContext {
         #endif
     }
 
-    func completion_loop() -> String {
+    func completion_loop() throws -> String {
         if shouldStop {
             is_done = true
             return ""
@@ -384,13 +401,16 @@ actor LlamaContext {
         batchClear()
         batchAdd(new_token_id, n_cur, [0], true)
 
+        let ret = llama_decode(context, batch)
+        if ret != 0 {
+            is_done = true
+            print("failed to evaluate llama, ret = \(ret)")
+            throw LlamaError.decodeFailed(ret)
+        }
+
         n_decode += 1
         n_cur += 1
         maxNewTokensRemaining -= 1
-
-        if llama_decode(context, batch) != 0 {
-            print("failed to evaluate llama")
-        }
 
         return new_token_str
     }

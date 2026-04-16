@@ -32,6 +32,16 @@ enum FileLocations {
         return dir
     }
 
+    static func sessionDirectory(create: Bool = true) throws -> URL {
+        let fm = FileManager.default
+        let appSupport = try fm.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        let dir = appSupport.appendingPathComponent("Session", isDirectory: true)
+        if create {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        return dir
+    }
+
     static func attachmentFileURL(filename: String) -> URL {
         let fm = FileManager.default
         let appSupport = (try? fm.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true))

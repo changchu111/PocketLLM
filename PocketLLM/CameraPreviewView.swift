@@ -4,6 +4,7 @@ import AVFoundation
 struct CameraPreviewView: UIViewControllerRepresentable {
     let useFrontCamera: Bool
     let captureNonce: Int
+    let isPaused: Bool
     let onImage: (UIImage) -> Void
 
     func makeUIViewController(context: Context) -> CameraViewController {
@@ -14,6 +15,7 @@ struct CameraPreviewView: UIViewControllerRepresentable {
 
     func updateUIViewController(_ uiViewController: CameraViewController, context: Context) {
         uiViewController.setUseFrontCamera(useFrontCamera)
+        uiViewController.setPaused(isPaused)
         if context.coordinator.lastCaptureNonce != captureNonce {
             context.coordinator.lastCaptureNonce = captureNonce
             uiViewController.capture()
@@ -38,6 +40,8 @@ final class CameraViewController: UIViewController {
     private var currentPosition: AVCaptureDevice.Position = .back
 
     private var isConfigured = false
+    private var isConfiguringSession = false
+    private var isPaused = false
     private let sessionQueue = DispatchQueue(label: "PocketLLM.camera.session")
 
     private var inFlightCaptureDelegate: PhotoCaptureDelegate?
@@ -75,7 +79,7 @@ final class CameraViewController: UIViewController {
 
     func capture() {
         sessionQueue.async {
-            guard self.isConfigured else { return }
+            guard self.isConfigured, !self.isPaused else { return }
             let settings = AVCapturePhotoSettings()
 
             let delegate = PhotoCaptureDelegate(
@@ -112,22 +116,45 @@ final class CameraViewController: UIViewController {
         }
     }
 
+    func setPaused(_ paused: Bool) {
+        sessionQueue.async {
+            self.isPaused = paused
+            if paused {
+                if self.session.isRunning {
+                    self.session.stopRunning()
+                }
+            } else {
+                self.startRunningIfPossible()
+            }
+        }
+    }
+
     private func startIfNeeded() {
         sessionQueue.async {
             if !self.isConfigured {
                 self.configureSession()
             }
-            if !self.session.isRunning {
-                self.session.startRunning()
-            }
+            self.startRunningIfPossible()
         }
     }
 
     private func reconfigureIfNeeded() {
         sessionQueue.async {
             guard self.isConfigured else { return }
+            let wasRunning = self.session.isRunning
+            if wasRunning {
+                self.session.stopRunning()
+            }
+
+            self.isConfiguringSession = true
             self.session.beginConfiguration()
-            defer { self.session.commitConfiguration() }
+            defer {
+                self.session.commitConfiguration()
+                self.isConfiguringSession = false
+                if wasRunning {
+                    self.startRunningIfPossible()
+                }
+            }
 
             // Remove existing video inputs
             for input in self.session.inputs {
@@ -144,8 +171,12 @@ final class CameraViewController: UIViewController {
     }
 
     private func configureSession() {
+        isConfiguringSession = true
         session.beginConfiguration()
-        defer { session.commitConfiguration() }
+        defer {
+            session.commitConfiguration()
+            isConfiguringSession = false
+        }
 
         session.sessionPreset = .photo
 
@@ -168,6 +199,14 @@ final class CameraViewController: UIViewController {
         }
 
         isConfigured = true
+    }
+
+    private func startRunningIfPossible() {
+        guard isConfigured else { return }
+        guard !isConfiguringSession else { return }
+        guard !isPaused else { return }
+        guard !session.isRunning else { return }
+        session.startRunning()
     }
 
     private func makeVideoInput(position: AVCaptureDevice.Position) -> AVCaptureDeviceInput? {

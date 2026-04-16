@@ -13,6 +13,7 @@ struct CameraScreen: View {
             CameraPreviewView(
                 useFrontCamera: useFrontCamera,
                 captureNonce: captureNonce,
+                isPaused: showingPicker,
                 onImage: onImage
             )
             .ignoresSafeArea()
