@@ -18,6 +18,8 @@ final class ChatViewModel: ObservableObject {
     @Published var messages: [ChatMessage]
     @Published var draft: String = ""
     @Published var isGenerating = false
+    @Published var isSwitchingModel = false
+    @Published var modelLoadingMessage: String = "Loading model..."
     @Published var errorMessage: String?
     @Published var streamingAssistantID: UUID?
     @Published var pendingImage: PlatformImage?
@@ -28,6 +30,8 @@ final class ChatViewModel: ObservableObject {
     private let engine = LLMEngine()
 
     private var generationTask: Task<Void, Never>?
+    private var preloadTask: Task<Void, Never>?
+    private var selectionRequestID: Int = 0
     private var cancellables = Set<AnyCancellable>()
 
     init(modelStore: ModelStore, settings: GenerationSettings, sessionStore: SessionStore) {
@@ -42,6 +46,15 @@ final class ChatViewModel: ObservableObject {
                 self?.sessionStore.updateMessages(messages)
             }
             .store(in: &cancellables)
+
+        Publishers.CombineLatest3(modelStore.$activeModelID, modelStore.$activeMMProjID, settings.$contextLength)
+            .dropFirst()
+            .sink { [weak self] _, _, _ in
+                self?.handleSelectionChange()
+            }
+            .store(in: &cancellables)
+
+        handleSelectionChange()
     }
 
     func setPendingImage(_ image: PlatformImage) {
@@ -53,17 +66,12 @@ final class ChatViewModel: ObservableObject {
     }
 
     func send() {
+        let requestStartedAt = CFAbsoluteTimeGetCurrent()
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         let image = pendingImage
         guard !text.isEmpty || image != nil else { return }
         draft = ""
         errorMessage = nil
-
-        let previousGenerationTask = generationTask
-        previousGenerationTask?.cancel()
-        generationTask = nil
-        isGenerating = false
-        streamingAssistantID = nil
 
         // Single-image mode: each new image starts a fresh visual context.
         // Keep only the system prompt to avoid carrying prior image-heavy history
@@ -96,9 +104,9 @@ final class ChatViewModel: ObservableObject {
         }
 
         let imageURL = attachments.first(where: { $0.type == .image })?.url
-        let mmprojURL = imageURL != nil ? modelStore.activeMMProjURL() : nil
+        let mmprojURL = imageURL != nil ? modelStore.compatibleActiveMMProjURL() : nil
         if imageURL != nil, mmprojURL == nil {
-            errorMessage = "Download and select an mmproj model first (Models → mmproj-F16.gguf)."
+            errorMessage = modelStore.activeMMProjCompatibilityError() ?? "Download and select a matching mmproj model first."
             isGenerating = false
             return
         }
@@ -107,9 +115,6 @@ final class ChatViewModel: ObservableObject {
 
         generationTask = Task { @MainActor in
             do {
-                await engine.stop()
-                await previousGenerationTask?.value
-
                 try await engine.loadIfNeeded(
                     modelURL: modelURL,
                     contextLength: settings.contextLength,
@@ -127,7 +132,7 @@ final class ChatViewModel: ObservableObject {
             activeImageMessageID: imageURL != nil ? userMessageID : nil,
             maxRecentRounds: 2
         )
-                try await engine.generate(prompt: prompt, imageURL: imageURL, maxNewTokens: settings.maxNewTokens) { token in
+                let metrics = try await engine.generate(prompt: prompt, imageURL: imageURL, maxNewTokens: settings.maxNewTokens, requestStartedAt: requestStartedAt) { token in
                     if let idx = self.messages.firstIndex(where: { $0.id == assistantID }) {
                         // Streaming: do NOT trim trailing newlines, otherwise list formatting breaks
                         // whenever a newline arrives as a standalone token.
@@ -139,6 +144,12 @@ final class ChatViewModel: ObservableObject {
                 // Final cleanup after generation completes.
                 if let idx = self.messages.firstIndex(where: { $0.id == assistantID }) {
                     self.messages[idx].text = PromptBuilder.postprocessAssistantTextFinal(self.messages[idx].text)
+                    self.messages[idx].stats = GenerationStats(
+                        ttftSeconds: metrics.ttftSeconds,
+                        tokensPerSecond: metrics.tokensPerSecond,
+                        totalSeconds: metrics.totalSeconds,
+                        generatedTokenCount: metrics.generatedTokenCount
+                    )
                 }
             } catch is CancellationError {
                 // user stopped generation
@@ -157,6 +168,56 @@ final class ChatViewModel: ObservableObject {
         Task { await engine.stop() }
         isGenerating = false
         streamingAssistantID = nil
+    }
+
+    private func handleSelectionChange() {
+        selectionRequestID += 1
+        let requestID = selectionRequestID
+
+        guard modelStore.activeModelURL() != nil else {
+            isSwitchingModel = false
+            modelLoadingMessage = "Loading model..."
+            let previousGenerationTask = generationTask
+            let previousPreloadTask = preloadTask
+            generationTask?.cancel()
+            generationTask = nil
+            isGenerating = false
+            streamingAssistantID = nil
+
+            preloadTask?.cancel()
+            preloadTask = Task { @MainActor in
+                await engine.stop()
+                await previousGenerationTask?.value
+                await previousPreloadTask?.value
+                await engine.unload()
+            }
+            return
+        }
+
+        isSwitchingModel = true
+        if let model = modelStore.activeModel() {
+            modelLoadingMessage = "Loading \(model.name)..."
+        } else {
+            modelLoadingMessage = "Loading model..."
+        }
+
+        let previousGenerationTask = generationTask
+        let previousPreloadTask = preloadTask
+        generationTask?.cancel()
+        generationTask = nil
+        isGenerating = false
+        streamingAssistantID = nil
+
+        preloadTask?.cancel()
+        preloadTask = Task { @MainActor in
+            await engine.stop()
+            await previousGenerationTask?.value
+            await previousPreloadTask?.value
+            await engine.unload()
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            guard self.selectionRequestID == requestID else { return }
+            self.schedulePreloadForCurrentSelection(requestID: requestID)
+        }
     }
 
     func clearChat() {
@@ -188,6 +249,52 @@ final class ChatViewModel: ObservableObject {
 
         return ChatAttachment(type: .image, localPath: url.path)
     }
+
+    private func schedulePreloadForCurrentSelection(requestID: Int) {
+        guard let modelURL = modelStore.activeModelURL() else {
+            preloadTask = Task { await engine.unload() }
+            return
+        }
+
+        let mmprojURL = modelStore.compatibleActiveMMProjURL()
+        let contextLength = settings.contextLength
+        let temperature = settings.temperature
+        let topK = settings.topK
+        let topP = settings.topP
+        let presencePenalty = settings.presencePenalty
+        let frequencyPenalty = settings.frequencyPenalty
+        let seed = settings.seed
+
+        preloadTask = Task {
+            do {
+                try await engine.loadIfNeeded(
+                    modelURL: modelURL,
+                    contextLength: contextLength,
+                    temperature: temperature,
+                    topK: topK,
+                    topP: topP,
+                    presencePenalty: presencePenalty,
+                    frequencyPenalty: frequencyPenalty,
+                    mmprojURL: mmprojURL,
+                    seed: seed
+                )
+                await MainActor.run {
+                    guard self.selectionRequestID == requestID else { return }
+                    self.isSwitchingModel = false
+                    self.modelLoadingMessage = "Loading model..."
+                }
+            } catch is CancellationError {
+                // selection changed again
+            } catch {
+                await MainActor.run {
+                    guard self.selectionRequestID == requestID else { return }
+                    self.errorMessage = error.localizedDescription
+                    self.isSwitchingModel = false
+                    self.modelLoadingMessage = "Loading model..."
+                }
+            }
+        }
+    }
 }
 
 private extension UIImage {
@@ -207,6 +314,13 @@ private extension UIImage {
 }
 
 actor LLMEngine {
+    struct GenerationMetrics {
+        let ttftSeconds: Double
+        let tokensPerSecond: Double
+        let totalSeconds: Double
+        let generatedTokenCount: Int
+    }
+
     private var ctx: LlamaContext?
     private var loadedModelPath: String?
     private var loadedContextLength: Int32?
@@ -238,7 +352,7 @@ actor LLMEngine {
             || (loadedMMProjPath != mmprojPath)
 
         if needsReload {
-            unload()
+            await unload()
 
             ctx = try LlamaContext.create_context(
                 path: path,
@@ -288,8 +402,10 @@ actor LLMEngine {
         }
     }
 
-    func generate(prompt: String, imageURL: URL?, maxNewTokens: Int32, onToken: @MainActor @Sendable (String) async -> Void) async throws {
+    func generate(prompt: String, imageURL: URL?, maxNewTokens: Int32, requestStartedAt: CFAbsoluteTime, onToken: @MainActor @Sendable (String) async -> Void) async throws -> GenerationMetrics {
         guard let ctx else { throw NSError(domain: "PocketLLM", code: 1, userInfo: [NSLocalizedDescriptionKey: "Model not loaded"]) }
+        var firstTokenAt: Double?
+        var generatedTokenCount = 0
         do {
             try await ctx.completion_init(text: prompt, imageURL: imageURL, maxNewTokens: maxNewTokens)
 
@@ -306,6 +422,10 @@ actor LLMEngine {
             while await !ctx.is_done {
                 try Task.checkCancellation()
                 let token = try await ctx.completion_loop()
+                generatedTokenCount += 1
+                if firstTokenAt == nil {
+                    firstTokenAt = CFAbsoluteTimeGetCurrent()
+                }
                 if !token.isEmpty {
                     pending += token
 
@@ -339,6 +459,16 @@ actor LLMEngine {
                 pending = ""
             }
             await ctx.clear()
+            let finishedAt = CFAbsoluteTimeGetCurrent()
+            let ttft = max(0, (firstTokenAt ?? finishedAt) - requestStartedAt)
+            let generationWindow = max(0.001, finishedAt - (firstTokenAt ?? finishedAt))
+            let tps = Double(generatedTokenCount) / generationWindow
+            return GenerationMetrics(
+                ttftSeconds: ttft,
+                tokensPerSecond: tps,
+                totalSeconds: max(0, finishedAt - requestStartedAt),
+                generatedTokenCount: generatedTokenCount
+            )
         } catch {
             await ctx.clear()
             throw error
@@ -363,9 +493,17 @@ actor LLMEngine {
 
     private static func trimStopArtifacts(_ text: String) -> String {
         var out = text
-        for artifact in ["<|im_end|>", "<|im_start|>"] {
+        for artifact in ["<|im_end|>", "<|im_start|>assistant", "<|im_start|>", "|im_start|>assistant", "im_start|>assistant", "m_start|>assistant"] {
             if let r = out.range(of: artifact) {
                 out.removeSubrange(r.lowerBound..<out.endIndex)
+            }
+        }
+
+        let trailingArtifacts = ["assistant", "ssistant", "istant"]
+        for artifact in trailingArtifacts {
+            if out.hasSuffix(artifact) {
+                out.removeLast(artifact.count)
+                break
             }
         }
         return out
@@ -375,7 +513,11 @@ actor LLMEngine {
         await ctx?.requestStop()
     }
 
-    func unload() {
+    func unload() async {
+        if let ctx {
+            await ctx.requestStop()
+            await ctx.clear()
+        }
         ctx = nil
         loadedModelPath = nil
         loadedContextLength = nil

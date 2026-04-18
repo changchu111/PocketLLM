@@ -68,13 +68,17 @@ final class ModelStore: ObservableObject {
     init() {
         self.activeModelID = UserDefaults.standard.string(forKey: Self.activeModelKey)
         self.activeMMProjID = UserDefaults.standard.string(forKey: Self.activeMMProjKey)
-        refreshInstalled()
         loadCatalog()
+        refreshInstalled()
+    }
+
+    func activeModel() -> ModelDescriptor? {
+        guard let activeModelID else { return nil }
+        return installed.first(where: { $0.id == activeModelID && $0.kind == .model })
     }
 
     func activeModelURL() -> URL? {
-        guard let activeModelID else { return nil }
-        return installed.first(where: { $0.id == activeModelID })?.localURL
+        activeModel()?.localURL
     }
 
     func activeMMProjURL() -> URL? {
@@ -82,9 +86,38 @@ final class ModelStore: ObservableObject {
         return installed.first(where: { $0.id == activeMMProjID })?.localURL
     }
 
+    func compatibleActiveMMProjURL() -> URL? {
+        guard let model = activeModel(), let expectedMMProjID = model.pairedMMProjID else { return nil }
+        guard activeMMProjID == expectedMMProjID else { return nil }
+        return installed.first(where: { $0.id == expectedMMProjID && $0.kind == .mmproj })?.localURL
+    }
+
+    func activeMMProjCompatibilityError() -> String? {
+        guard let model = activeModel(), let expectedMMProjID = model.pairedMMProjID else { return nil }
+        guard activeMMProjID != expectedMMProjID else { return nil }
+        if downloadState[expectedMMProjID]?.status == .downloading {
+            return "The vision projector for \(model.name) is still downloading."
+        }
+        return "The vision projector for \(model.name) is not installed yet. Download the model again or wait for its dependency to finish."
+    }
+
     func setActiveModel(_ model: ModelDescriptor) {
         guard model.kind == .model else { return }
         activeModelID = model.id
+
+        guard let pairedID = model.pairedMMProjID else {
+            activeMMProjID = nil
+            return
+        }
+
+        if installed.contains(where: { $0.id == pairedID && $0.kind == .mmproj }) {
+            activeMMProjID = pairedID
+        } else {
+            activeMMProjID = nil
+            if let paired = catalog.first(where: { $0.id == pairedID && $0.kind == .mmproj }) {
+                downloadSingle(paired)
+            }
+        }
     }
 
     func setActiveMMProj(_ model: ModelDescriptor) {
@@ -136,7 +169,17 @@ final class ModelStore: ObservableObject {
     }
 
     func download(_ model: ModelDescriptor) {
+        guard model.kind == .model else {
+            downloadSingle(model)
+            return
+        }
+
         downloadSingle(model)
+
+        if let pairedID = model.pairedMMProjID,
+           let paired = catalog.first(where: { $0.id == pairedID && $0.kind == .mmproj }) {
+            downloadSingle(paired)
+        }
     }
 
     private func downloadSingle(_ model: ModelDescriptor) {
@@ -173,6 +216,12 @@ final class ModelStore: ObservableObject {
 
                     self.downloadState[model.id] = .init(progress: 1.0, status: .downloaded)
                     self.refreshInstalled()
+
+                    if model.kind == .mmproj,
+                       let activeModel = self.activeModel(),
+                       activeModel.pairedMMProjID == model.id {
+                        self.activeMMProjID = model.id
+                    }
                 } catch {
                     self.downloadState[model.id] = .init(progress: 0.0, status: .failed(error.localizedDescription))
                 }
@@ -200,6 +249,33 @@ final class ModelStore: ObservableObject {
         let model = ModelDescriptor(id: id, name: name, filename: file, source: .remote(url: url))
         if catalog.contains(where: { $0.id == id }) { return }
         catalog.insert(model, at: 0)
+    }
+
+    func pairedMMProjStatus(for model: ModelDescriptor) -> String? {
+        guard let pairedID = model.pairedMMProjID else { return nil }
+
+        if activeModelID == model.id, activeMMProjID == pairedID {
+            return "Vision projector ready"
+        }
+
+        if installed.contains(where: { $0.id == pairedID && $0.kind == .mmproj }) {
+            return "Vision projector installed"
+        }
+
+        if let state = downloadState[pairedID] {
+            switch state.status {
+            case .downloading:
+                return "Vision projector downloading"
+            case .failed(let message):
+                return "Vision projector failed: \(message)"
+            case .downloaded:
+                return "Vision projector downloaded"
+            case .idle:
+                break
+            }
+        }
+
+        return "Vision projector required"
     }
 
     private func descriptorForLocalFile(_ url: URL) -> ModelDescriptor {

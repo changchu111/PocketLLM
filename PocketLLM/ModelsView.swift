@@ -8,18 +8,17 @@ struct ModelsView: View {
     @State private var showingDeleteConfirmation = false
 
     private var installedModels: [ModelDescriptor] {
-        modelStore.installed
+        modelStore.installed.filter { $0.kind == .model }
     }
 
     private var downloadableModels: [ModelDescriptor] {
-        modelStore.catalog
+        modelStore.catalog.filter { $0.kind == .model }
     }
 
     var body: some View {
         NavigationStack {
             List {
                 activeSection
-                activeMMProjSection
                 installedSection
                 downloadSection
                 customSection
@@ -53,35 +52,23 @@ struct ModelsView: View {
         Section("Active") {
             if let activeID = modelStore.activeModelID,
                let active = modelStore.installed.first(where: { $0.id == activeID }) {
-                HStack {
-                    Text(active.name)
-                    Spacer()
-                    Button("Cancel") {
-                        modelStore.clearActiveModel()
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(active.name)
+                        Spacer()
+                        Button("Cancel") {
+                            modelStore.clearActiveModel()
+                        }
+                        .font(.caption)
                     }
-                    .font(.caption)
+                    if let status = modelStore.pairedMMProjStatus(for: active) {
+                        Text(status)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             } else {
                 Text("No model selected")
-                    .foregroundStyle(.secondary)
-            }
-        }
-    }
-
-    private var activeMMProjSection: some View {
-        Section("Active mmproj") {
-            if let activeID = modelStore.activeMMProjID,
-               let active = modelStore.installed.first(where: { $0.id == activeID }) {
-                HStack {
-                    Text(active.name)
-                    Spacer()
-                    Button("Cancel") {
-                        modelStore.clearActiveMMProj()
-                    }
-                    .font(.caption)
-                }
-            } else {
-                Text("No mmproj selected")
                     .foregroundStyle(.secondary)
             }
         }
@@ -97,6 +84,7 @@ struct ModelsView: View {
             ForEach(installedModels) { model in
                 InstalledModelRow(
                     model: model,
+                    subtitle: modelStore.pairedMMProjStatus(for: model),
                     isSelected: isSelected(model),
                     onSelect: { select(model) },
                     onDelete: {
@@ -113,6 +101,7 @@ struct ModelsView: View {
             ForEach(downloadableModels) { model in
                 DownloadModelRow(
                     model: model,
+                    subtitle: modelStore.pairedMMProjStatus(for: model),
                     isInstalled: modelStore.installed.contains(where: { $0.id == model.id }),
                     downloadState: modelStore.downloadState[model.id],
                     onSelect: { selectInstalledModel(withID: model.id) },
@@ -143,18 +132,11 @@ struct ModelsView: View {
     }
 
     private func select(_ model: ModelDescriptor) {
-        if model.kind == .mmproj {
-            modelStore.setActiveMMProj(model)
-        } else {
-            modelStore.setActiveModel(model)
-        }
+        modelStore.setActiveModel(model)
     }
 
     private func isSelected(_ model: ModelDescriptor) -> Bool {
-        if model.kind == .model {
-            return modelStore.activeModelID == model.id
-        }
-        return modelStore.activeMMProjID == model.id
+        modelStore.activeModelID == model.id
     }
 
     private var deleteButtonTitle: String {
@@ -174,6 +156,7 @@ struct ModelsView: View {
 
 private struct InstalledModelRow: View {
     let model: ModelDescriptor
+    let subtitle: String?
     let isSelected: Bool
     let onSelect: () -> Void
     let onDelete: () -> Void
@@ -185,6 +168,11 @@ private struct InstalledModelRow: View {
                 Text(model.filename)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if let subtitle {
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             Spacer()
             if isSelected {
@@ -209,6 +197,7 @@ private struct InstalledModelRow: View {
 
 private struct DownloadModelRow: View {
     let model: ModelDescriptor
+    let subtitle: String?
     let isInstalled: Bool
     let downloadState: ModelStore.DownloadState?
     let onSelect: () -> Void
@@ -220,6 +209,11 @@ private struct DownloadModelRow: View {
             Text(model.filename)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if let subtitle {
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
             HStack {
                 if isInstalled {

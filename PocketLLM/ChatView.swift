@@ -112,28 +112,64 @@ private struct MessageRow: View {
             if message.role == .user {
                 Spacer(minLength: 48)
             }
-            VStack(alignment: .leading, spacing: 8) {
-                if !message.attachments.isEmpty {
-                    AttachmentsView(attachments: message.attachments)
-                }
-                if !message.text.isEmpty {
-                    MessageText(role: message.role, text: message.text, isStreaming: isStreaming)
+
+            VStack(alignment: .leading, spacing: 6) {
+                bubble
+                if message.role == .assistant, let stats = message.stats {
+                    MessageStatsView(stats: stats)
+                        .padding(.horizontal, 4)
                 }
             }
-            .padding(12)
-            .background(message.role == .user ? Color.accentColor : Color(uiColor: .secondarySystemBackground))
-            .foregroundStyle(message.role == .user ? Color.white : Color.primary)
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .overlay {
-                    if message.role != .user {
-                        RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .stroke(Color(uiColor: .separator).opacity(0.2), lineWidth: 1)
-                    }
-                }
+
             if message.role != .user {
                 Spacer(minLength: 48)
             }
         }
+    }
+
+    private var bubble: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if !message.attachments.isEmpty {
+                AttachmentsView(attachments: message.attachments)
+            }
+            if !message.text.isEmpty {
+                MessageText(role: message.role, text: message.text, isStreaming: isStreaming)
+            }
+        }
+        .padding(12)
+        .background(message.role == .user ? Color.accentColor : Color(uiColor: .secondarySystemBackground))
+        .foregroundStyle(message.role == .user ? Color.white : Color.primary)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            if message.role != .user {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color(uiColor: .separator).opacity(0.2), lineWidth: 1)
+            }
+        }
+    }
+}
+
+private struct MessageStatsView: View {
+    let stats: GenerationStats
+
+    var body: some View {
+        Text("TTFT \(formatSeconds(stats.ttftSeconds)) · \(formatTPS(stats.tokensPerSecond)) · 总计 \(formatSeconds(stats.totalSeconds))")
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+    }
+
+    private func formatSeconds(_ value: Double) -> String {
+        if value >= 10 {
+            return String(format: "%.1f s", value)
+        }
+        return String(format: "%.2f s", value)
+    }
+
+    private func formatTPS(_ value: Double) -> String {
+        if value >= 100 {
+            return String(format: "%.0f token/s", value)
+        }
+        return String(format: "%.1f token/s", value)
     }
 }
 

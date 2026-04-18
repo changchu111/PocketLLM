@@ -26,11 +26,19 @@ struct ChatAttachment: Identifiable, Equatable, Codable {
     }
 }
 
+struct GenerationStats: Equatable, Codable {
+    var ttftSeconds: Double
+    var tokensPerSecond: Double
+    var totalSeconds: Double
+    var generatedTokenCount: Int
+}
+
 struct ChatMessage: Identifiable, Equatable, Codable {
     let id: UUID
     let role: ChatRole
     var text: String
     var attachments: [ChatAttachment]
+    var stats: GenerationStats?
     var createdAt: Date
 
     init(
@@ -38,12 +46,14 @@ struct ChatMessage: Identifiable, Equatable, Codable {
         role: ChatRole,
         text: String,
         attachments: [ChatAttachment] = [],
+        stats: GenerationStats? = nil,
         createdAt: Date = Date()
     ) {
         self.id = id
         self.role = role
         self.text = text
         self.attachments = attachments
+        self.stats = stats
         self.createdAt = createdAt
     }
 }
