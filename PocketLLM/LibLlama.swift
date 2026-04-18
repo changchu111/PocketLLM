@@ -356,6 +356,13 @@ actor LlamaContext {
         temporary_invalid_cchars = []
 
         let n_ctx = Int32(llama_n_ctx(context))
+        let remainingContext = n_ctx - n_cur
+        let reservedGenerationTokens = min(max(32, maxNewTokensRemaining / 4), 128)
+        print("mtmd prompt evaluated: n_past=\(n_cur), n_ctx=\(n_ctx), remaining=\(remainingContext), reserved_generation=\(reservedGenerationTokens)")
+        if remainingContext <= 1 || remainingContext < reservedGenerationTokens {
+            is_done = true
+            throw LlamaError.promptTooLong(promptTokens: n_cur, contextLength: n_ctx)
+        }
         n_len = min(n_ctx, n_cur + max(1, maxNewTokensRemaining))
         #else
         throw LlamaError.visionNotAvailable

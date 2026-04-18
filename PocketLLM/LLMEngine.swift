@@ -129,6 +129,7 @@ final class ChatViewModel: ObservableObject {
 
         let prompt = PromptBuilder.buildPrompt(
             from: promptSnapshot,
+            style: modelStore.activeModel()?.promptStyle ?? .chatML,
             activeImageMessageID: imageURL != nil ? userMessageID : nil,
             maxRecentRounds: 2
         )
@@ -239,8 +240,8 @@ final class ChatViewModel: ObservableObject {
         // Keep images smaller on iPhone to avoid huge mtmd/KV allocations.
         // Keep multimodal images small enough so visual tokens fit in a single batch on-device.
         // This is a stability tradeoff for iPhone memory / mtmd batching.
-        let scaled = image.scaledDown(maxDimension: 384)
-        guard let data = scaled.jpegData(compressionQuality: 0.85) else {
+        let scaled = image.scaledDown(maxDimension: 768)
+        guard let data = scaled.jpegData(compressionQuality: 0.9) else {
             throw NSError(domain: "PocketLLM", code: 2, userInfo: [NSLocalizedDescriptionKey: "JPEG encoding failed"])
         }
 
@@ -532,18 +533,31 @@ actor LLMEngine {
 }
 
 enum PromptBuilder {
-    static func buildPrompt(from messages: [ChatMessage], activeImageMessageID: UUID? = nil, maxRecentRounds: Int = 3) -> String {
+    enum Style {
+        case chatML
+        case miniCPMV4
+    }
+
+    static func buildPrompt(from messages: [ChatMessage], style: Style = .chatML, activeImageMessageID: UUID? = nil, maxRecentRounds: Int = 3) -> String {
         let system = messages.first(where: { $0.role == .system })?.text ?? ChatViewModel.defaultSystemPrompt
         let rounds = ConversationContextBuilder.rounds(from: messages)
         let currentUserText = rounds.last?.user.text ?? ""
+        let isImageTurn = activeImageMessageID != nil
 
-        let recentRounds = Array(rounds.suffix(maxRecentRounds))
-        let relatedSummary = ConversationContextBuilder.relatedHistorySummary(
-            allRounds: rounds,
-            currentQuery: currentUserText,
-            recentRoundsCount: recentRounds.count,
-            maxItems: 3
-        )
+        let recentRounds: [ConversationContextBuilder.Round]
+        let relatedSummary: String
+        if isImageTurn {
+            recentRounds = rounds.last.map { [$0] } ?? []
+            relatedSummary = ""
+        } else {
+            recentRounds = Array(rounds.suffix(maxRecentRounds))
+            relatedSummary = ConversationContextBuilder.relatedHistorySummary(
+                allRounds: rounds,
+                currentQuery: currentUserText,
+                recentRoundsCount: recentRounds.count,
+                maxItems: 3
+            )
+        }
 
         var enrichedSystem = system
         if !relatedSummary.isEmpty {
@@ -558,11 +572,9 @@ enum PromptBuilder {
                 let hasImage = m.attachments.contains(where: { $0.type == .image })
                 let userText: String
                 if hasImage, m.id == activeImageMessageID {
-                    // Single-image mode: only the current image-bearing user message gets a media marker.
                     let marker = "<__media__>"
                     userText = m.text.isEmpty ? marker : marker + "\n" + m.text
                 } else if hasImage {
-                    // Preserve chat continuity without injecting stale media markers from history.
                     let placeholder = "[Image attached previously]"
                     userText = m.text.isEmpty ? placeholder : placeholder + "\n" + m.text
                 } else {
@@ -576,10 +588,22 @@ enum PromptBuilder {
                 break
             }
         }
-        // Qwen3.5 ChatML template supports "thinking" (<think>...</think>).
-        // To avoid emitting think tokens in the visible transcript, we prompt with an empty think block.
-        out += "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+
+        switch style {
+        case .chatML:
+            // Qwen3.5 ChatML template supports "thinking" (<think>...</think>).
+            // To avoid emitting think tokens in the visible transcript, we prompt with an empty think block.
+            out += "<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        case .miniCPMV4:
+            out += "<|im_start|>assistant\n"
+        }
         return out
+    }
+}
+
+private extension ModelDescriptor {
+    var promptStyle: PromptBuilder.Style {
+        isMiniCPMV4 ? .miniCPMV4 : .chatML
     }
 }
 

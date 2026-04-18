@@ -3,7 +3,7 @@ import Combine
 
 @MainActor
 final class GenerationSettings: ObservableObject {
-    @Published var contextLength: Int32 = 2048
+    @Published var contextLength: Int32 = 4096
     @Published var maxNewTokens: Int32 = 512
 
     @Published var temperature: Float = 0.7

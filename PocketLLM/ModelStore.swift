@@ -371,7 +371,7 @@ final class ModelStore: ObservableObject {
 
 }
 
-private extension ModelDescriptor {
+extension ModelDescriptor {
     var localURL: URL {
         switch source {
         case .localFile(let url):
@@ -379,6 +379,11 @@ private extension ModelDescriptor {
         case .remote:
             return FileLocations.modelFileURL(filename: filename)
         }
+    }
+
+    var isMiniCPMV4: Bool {
+        let haystack = "\(id) \(filename) \(name)".lowercased()
+        return haystack.contains("minicpm-v4") || haystack.contains("minicpm v4")
     }
 }
 
