@@ -231,6 +231,16 @@ final class ChatViewModel: ObservableObject {
         Task { await engine.unload() }
     }
 
+    func startDemo(prompt: String) {
+        stop()
+        messages = Self.defaultMessages
+        errorMessage = nil
+        streamingAssistantID = nil
+        pendingImage = nil
+        draft = prompt
+        sessionStore.reset(messages: messages)
+    }
+
     private func persistImageAttachment(_ image: UIImage) throws -> ChatAttachment {
         let uuid = UUID().uuidString
         let filename = "\(uuid).jpg"

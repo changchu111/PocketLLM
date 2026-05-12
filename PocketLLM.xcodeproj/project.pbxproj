@@ -9,6 +9,9 @@
 /* Begin PBXBuildFile section */
 		B045BBAC2F8274B3003A5122 /* Frameworks/llama.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = B045BBAA2F827442003A5122 /* Frameworks/llama.xcframework */; };
 		B045BBAD2F8274B3003A5122 /* Frameworks/llama.xcframework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = B045BBAA2F827442003A5122 /* Frameworks/llama.xcframework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		B045BBB02F843001003A5122 /* onnxruntime in Frameworks */ = {isa = PBXBuildFile; productRef = B045BBAF2F843001003A5122 /* onnxruntime */; };
+		B045BBB12F843001003A5122 /* Hub in Frameworks */ = {isa = PBXBuildFile; productRef = B045BBB22F843001003A5122 /* Hub */; };
+		B045BBB32F843001003A5122 /* Tokenizers in Frameworks */ = {isa = PBXBuildFile; productRef = B045BBB42F843001003A5122 /* Tokenizers */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -73,6 +76,9 @@
 			buildActionMask = 2147483647;
 			files = (
 				B045BBAC2F8274B3003A5122 /* Frameworks/llama.xcframework in Frameworks */,
+				B045BBB02F843001003A5122 /* onnxruntime in Frameworks */,
+				B045BBB12F843001003A5122 /* Hub in Frameworks */,
+				B045BBB32F843001003A5122 /* Tokenizers in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -135,6 +141,9 @@
 			);
 			name = PocketLLM;
 			packageProductDependencies = (
+				B045BBAF2F843001003A5122 /* onnxruntime */,
+				B045BBB22F843001003A5122 /* Hub */,
+				B045BBB42F843001003A5122 /* Tokenizers */,
 			);
 			productName = PocketLLM;
 			productReference = B045BB602F8236F6003A5122 /* PocketLLM.app */;
@@ -218,6 +227,10 @@
 			);
 			mainGroup = B045BB572F8236F6003A5122;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				B045BBAE2F843001003A5122 /* XCRemoteSwiftPackageReference "onnxruntime-swift-package-manager" */,
+				B045BBB52F843001003A5122 /* XCRemoteSwiftPackageReference "swift-transformers" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = B045BB612F8236F6003A5122 /* Products */;
 			projectDirPath = "";
@@ -607,6 +620,43 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		B045BBAE2F843001003A5122 /* XCRemoteSwiftPackageReference "onnxruntime-swift-package-manager" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/microsoft/onnxruntime-swift-package-manager";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.24.2;
+			};
+		};
+		B045BBB52F843001003A5122 /* XCRemoteSwiftPackageReference "swift-transformers" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/huggingface/swift-transformers";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.3.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		B045BBAF2F843001003A5122 /* onnxruntime */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B045BBAE2F843001003A5122 /* XCRemoteSwiftPackageReference "onnxruntime-swift-package-manager" */;
+			productName = onnxruntime;
+		};
+		B045BBB22F843001003A5122 /* Hub */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B045BBB52F843001003A5122 /* XCRemoteSwiftPackageReference "swift-transformers" */;
+			productName = Hub;
+		};
+		B045BBB42F843001003A5122 /* Tokenizers */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B045BBB52F843001003A5122 /* XCRemoteSwiftPackageReference "swift-transformers" */;
+			productName = Tokenizers;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = B045BB582F8236F6003A5122 /* Project object */;
 }

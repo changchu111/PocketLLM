@@ -52,6 +52,16 @@ enum FileLocations {
         }
         return fm.urls(for: .documentDirectory, in: .userDomainMask)[0].appendingPathComponent(filename)
     }
+
+    static func privacyFilterDirectory(create: Bool = true) throws -> URL {
+        let fm = FileManager.default
+        let appSupport = try fm.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
+        let dir = appSupport.appendingPathComponent("PrivacyFilter", isDirectory: true)
+        if create {
+            try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        return dir
+    }
 }
 
 extension URL {

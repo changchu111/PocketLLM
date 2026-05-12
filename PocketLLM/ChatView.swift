@@ -6,20 +6,55 @@ import UIKit
 
 struct ChatView: View {
     @ObservedObject var viewModel: ChatViewModel
-    @EnvironmentObject private var app: AppModel
+
+    var body: some View {
+        NavigationStack {
+            ChatSurface(viewModel: viewModel, title: "PocketLLM")
+        }
+    }
+}
+
+struct ChatScreen: View {
+    @ObservedObject var viewModel: ChatViewModel
+    let title: String
+    var introTitle: String?
+    var introText: String?
+    var requiresImage: Bool = false
+
+    var body: some View {
+        ChatSurface(
+            viewModel: viewModel,
+            title: title,
+            introTitle: introTitle,
+            introText: introText,
+            requiresImage: requiresImage
+        )
+    }
+}
+
+private struct ChatSurface: View {
+    @ObservedObject var viewModel: ChatViewModel
+    let title: String
+    var introTitle: String? = nil
+    var introText: String? = nil
+    var requiresImage: Bool = false
 
     @FocusState private var isComposerFocused: Bool
-
     @State private var showingCamera = false
 
     private var visibleMessages: [ChatMessage] {
         viewModel.messages.filter { $0.role != .system }
     }
 
-
     var body: some View {
-        NavigationStack {
+        ZStack {
             VStack(spacing: 0) {
+                if introTitle != nil || introText != nil || requiresImage {
+                    DemoIntroCard(title: introTitle, text: introText, requiresImage: requiresImage)
+                        .padding(.horizontal)
+                        .padding(.top, 12)
+                }
+
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 12) {
@@ -79,15 +114,21 @@ struct ChatView: View {
                 .padding(.vertical, 10)
                 .background(.bar)
             }
-            .navigationTitle("PocketLLM")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        viewModel.clearChat()
-                    } label: {
-                        Image(systemName: "eraser")
-                    }
+
+            if viewModel.isSwitchingModel {
+                ChatLoadingOverlay(message: viewModel.modelLoadingMessage)
+                    .transition(.opacity)
+                    .zIndex(1)
+            }
+        }
+        .navigationTitle(title)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    viewModel.clearChat()
+                } label: {
+                    Image(systemName: "eraser")
                 }
             }
         }
@@ -100,6 +141,62 @@ struct ChatView: View {
                 }
             )
         }
+    }
+}
+
+private struct ChatLoadingOverlay: View {
+    let message: String
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.25)
+                .ignoresSafeArea()
+
+            VStack(spacing: 14) {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .scaleEffect(1.1)
+                Text(message)
+                    .font(.headline)
+                Text("Please wait until the model is ready.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 24)
+            .padding(.vertical, 20)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .shadow(radius: 10)
+        }
+        .allowsHitTesting(true)
+        .accessibilityAddTraits(.isModal)
+    }
+}
+
+private struct DemoIntroCard: View {
+    let title: String?
+    let text: String?
+    let requiresImage: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let title, !title.isEmpty {
+                Text(title)
+                    .font(.headline)
+            }
+            if let text, !text.isEmpty {
+                Text(text)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+            if requiresImage {
+                Label("请先添加一张图片，再发送消息体验这个 demo。", systemImage: "camera")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 
@@ -199,11 +296,10 @@ private struct MessageText: View {
     let isStreaming: Bool
 
     var body: some View {
-        // Markdown rendering disabled.
         Text(text)
-        .textSelection(.enabled)
-        .font(.body)
-        .fixedSize(horizontal: false, vertical: true)
+            .textSelection(.enabled)
+            .font(.body)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -219,11 +315,11 @@ private struct AttachmentChip: View {
                 .frame(width: 36, height: 36)
                 .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 
-            Text("Photo")
+            Text("图片")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.primary)
 
-            Text("optimized")
+            Text("已优化")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -260,7 +356,7 @@ private struct ComposerBar: View {
             }
             .buttonStyle(.plain)
 
-            TextField("Message", text: $text, axis: .vertical)
+            TextField("输入消息", text: $text, axis: .vertical)
                 .lineLimit(1...6)
                 .textFieldStyle(.roundedBorder)
                 .focused($isFocused)
