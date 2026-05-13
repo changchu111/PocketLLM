@@ -319,6 +319,22 @@ final class ModelStore: ObservableObject {
             source: .remote(url: URL(string: "https://hf-mirror.com/unsloth/Qwen3.5-2B-GGUF/resolve/main/mmproj-F16.gguf")!)
         )
 
+        let miniCPM46 = ModelDescriptor(
+            id: "MiniCPM-V-4_6-Q4_K_M.gguf",
+            name: "MiniCPM-V 4.6 (Q4_K_M)",
+            filename: "MiniCPM-V-4_6-Q4_K_M.gguf",
+            pairedMMProjID: "MiniCPM-V-4_6-mmproj-model-f16.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/openbmb/MiniCPM-V-4.6-gguf/resolve/main/MiniCPM-V-4_6-Q4_K_M.gguf")!)
+        )
+
+        let miniCPM46MMProj = ModelDescriptor(
+            id: "MiniCPM-V-4_6-mmproj-model-f16.gguf",
+            name: "MiniCPM-V 4.6 mmproj (F16)",
+            filename: "MiniCPM-V-4_6-mmproj-model-f16.gguf",
+            kind: .mmproj,
+            source: .remote(url: URL(string: "https://hf-mirror.com/openbmb/MiniCPM-V-4.6-gguf/resolve/main/mmproj-model-f16.gguf")!)
+        )
+
         let miniCPM = ModelDescriptor(
             id: "MiniCPM-V-4_5-Q4_K_M.gguf",
             name: "MiniCPM-V 4.5 (Q4_K_M)",
@@ -366,7 +382,7 @@ final class ModelStore: ObservableObject {
             source: .remote(url: URL(string: "https://hf-mirror.com/openbmb/MiniCPM-V-4_5-gguf/resolve/main/mmproj-model-f16.gguf")!)
         )
 
-        catalog = [qwen, qwenMMProj, miniCPM, miniCPMQ40, miniCPM41, miniCPMV4, miniCPMV4MMProj, miniCPMMMProj]
+        catalog = [qwen, qwenMMProj, miniCPM46, miniCPM46MMProj, miniCPM, miniCPMQ40, miniCPM41, miniCPMV4, miniCPMV4MMProj, miniCPMMMProj]
     }
 
 }
@@ -383,7 +399,18 @@ extension ModelDescriptor {
 
     var isMiniCPMV4: Bool {
         let haystack = "\(id) \(filename) \(name)".lowercased()
-        return haystack.contains("minicpm-v4") || haystack.contains("minicpm v4")
+        return haystack.contains("minicpm-v4")
+            || haystack.contains("minicpm-v-4")
+            || haystack.contains("minicpm v4")
+            || haystack.contains("minicpm-v 4")
+    }
+
+    var isMiniCPMV46: Bool {
+        let haystack = "\(id) \(filename) \(name)".lowercased()
+        return haystack.contains("minicpm-v-4_6")
+            || haystack.contains("minicpm-v 4.6")
+            || haystack.contains("minicpm-v-4.6")
+            || haystack.contains("minicpm-v 4_6")
     }
 }
 

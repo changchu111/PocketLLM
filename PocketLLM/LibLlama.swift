@@ -112,13 +112,15 @@ actor LlamaContext {
         llama_backend_free()
     }
 
-    static func create_context(path: String, contextLength: Int32, temperature: Float, topK: Int32, topP: Float, presencePenalty: Float, frequencyPenalty: Float, mmprojPath: String?, seed: UInt32) throws -> LlamaContext {
+    static func create_context(path: String, contextLength: Int32, temperature: Float, topK: Int32, topP: Float, presencePenalty: Float, frequencyPenalty: Float, mmprojPath: String?, seed: UInt32, imageMaxSlices: Int32) throws -> LlamaContext {
         llama_backend_init()
         var model_params = llama_model_default_params()
 
 #if targetEnvironment(simulator)
         model_params.n_gpu_layers = 0
         print("Running on simulator, force use n_gpu_layers = 0")
+#else
+        model_params.n_gpu_layers = 999
 #endif
         let model = llama_model_load_from_file(path, model_params)
         guard let model else {
@@ -158,11 +160,16 @@ actor LlamaContext {
             let useCPUForMMProj = modelFilename.contains("minicpm-v-4_5")
 
             // MiniCPM-V 4.5 projector is too large for stable Metal allocation on iPhone.
-            // Keep MiniCPM-V4 and Qwen mmproj on GPU, but force only MiniCPM-V 4.5 mmproj to CPU.
+            // MiniCPM-V 4.6 is designed for mobile and is much faster with the projector on GPU.
             mparams.use_gpu = !useCPUForMMProj
             mparams.print_timings = false
             mparams.n_threads = Int32(n_threads)
+            mparams.image_max_slices = max(1, min(9, imageMaxSlices))
             mtmdCtx = mtmd_init_from_file(mmprojPath, model, mparams)
+            if mtmdCtx == nil, !useCPUForMMProj {
+                mparams.use_gpu = false
+                mtmdCtx = mtmd_init_from_file(mmprojPath, model, mparams)
+            }
             if mtmdCtx == nil {
                 throw LlamaError.mtmdInitFailed
             }

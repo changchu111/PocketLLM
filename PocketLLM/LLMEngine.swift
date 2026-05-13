@@ -10,7 +10,7 @@ typealias PlatformImage = Any
 
 @MainActor
 final class ChatViewModel: ObservableObject {
-    static let defaultSystemPrompt = "You are a helpful assistant. Reply in Markdown. Use explicit line breaks: put each bullet/list item on its own line. Do not output <think> blocks."
+    static let defaultSystemPrompt = "You are a helpful assistant. Reply in the same language as the user. If the user writes Chinese, reply in Chinese. Reply in Markdown. Use explicit line breaks: put each bullet/list item on its own line. Do not output <think> blocks."
     static let defaultMessages: [ChatMessage] = [
         ChatMessage(role: .system, text: defaultSystemPrompt)
     ]
@@ -34,6 +34,23 @@ final class ChatViewModel: ObservableObject {
     private var selectionRequestID: Int = 0
     private var cancellables = Set<AnyCancellable>()
 
+    var activeModelName: String {
+        modelStore.activeModel()?.name ?? "未选择模型"
+    }
+
+    var installedModels: [ModelDescriptor] {
+        modelStore.installed.filter { $0.kind == .model }
+    }
+
+    var activeModelIsMiniCPMV46: Bool {
+        modelStore.activeModel()?.isMiniCPMV46 == true
+    }
+
+    var miniCPMV46ImageSlices: Int32 {
+        get { settings.miniCPMV46ImageSlices }
+        set { settings.miniCPMV46ImageSlices = max(1, min(9, newValue)) }
+    }
+
     init(modelStore: ModelStore, settings: GenerationSettings, sessionStore: SessionStore) {
         self.modelStore = modelStore
         self.settings = settings
@@ -54,6 +71,25 @@ final class ChatViewModel: ObservableObject {
             }
             .store(in: &cancellables)
 
+        settings.$miniCPMV46ImageSlices
+            .dropFirst()
+            .sink { [weak self] _ in
+                self?.handleSelectionChange()
+            }
+            .store(in: &cancellables)
+
+        modelStore.objectWillChange
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
+
+        settings.objectWillChange
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
+
         handleSelectionChange()
     }
 
@@ -63,6 +99,16 @@ final class ChatViewModel: ObservableObject {
 
     func clearPendingImage() {
         pendingImage = nil
+    }
+
+    func selectModel(_ model: ModelDescriptor) {
+        modelStore.setActiveModel(model)
+    }
+
+    func prepareForChat() {
+        guard modelStore.activeModelURL() != nil else { return }
+        if isSwitchingModel { return }
+        schedulePreloadForCurrentSelection(requestID: selectionRequestID)
     }
 
     func send() {
@@ -115,25 +161,34 @@ final class ChatViewModel: ObservableObject {
 
         generationTask = Task { @MainActor in
             do {
+                let activeModel = modelStore.activeModel()
+                let isMiniCPMV46 = activeModel?.isMiniCPMV46 == true
+                let effectiveTopK = isMiniCPMV46 ? Int32(0) : settings.topK
+                let effectiveTopP = isMiniCPMV46 ? Float(1.0) : settings.topP
+                let effectivePresencePenalty = isMiniCPMV46 ? Float(0.0) : settings.presencePenalty
+                let effectiveFrequencyPenalty = isMiniCPMV46 ? Float(0.0) : settings.frequencyPenalty
+
                 try await engine.loadIfNeeded(
                     modelURL: modelURL,
                     contextLength: settings.contextLength,
                     temperature: settings.temperature,
-                    topK: settings.topK,
-                    topP: settings.topP,
-                    presencePenalty: settings.presencePenalty,
-                    frequencyPenalty: settings.frequencyPenalty,
+                    topK: effectiveTopK,
+                    topP: effectiveTopP,
+                    presencePenalty: effectivePresencePenalty,
+                    frequencyPenalty: effectiveFrequencyPenalty,
                     mmprojURL: mmprojURL,
-                    seed: settings.seed
+                    seed: settings.seed,
+                    imageMaxSlices: isMiniCPMV46 ? settings.miniCPMV46ImageSlices : 9
                 )
 
         let prompt = PromptBuilder.buildPrompt(
             from: promptSnapshot,
-            style: modelStore.activeModel()?.promptStyle ?? .chatML,
+            style: activeModel?.promptStyle ?? .chatML,
             activeImageMessageID: imageURL != nil ? userMessageID : nil,
             maxRecentRounds: 2
         )
-                let metrics = try await engine.generate(prompt: prompt, imageURL: imageURL, maxNewTokens: settings.maxNewTokens, requestStartedAt: requestStartedAt) { token in
+                let maxNewTokens = settings.maxNewTokens
+                let metrics = try await engine.generate(prompt: prompt, imageURL: imageURL, maxNewTokens: maxNewTokens, requestStartedAt: requestStartedAt) { token in
                     if let idx = self.messages.firstIndex(where: { $0.id == assistantID }) {
                         // Streaming: do NOT trim trailing newlines, otherwise list formatting breaks
                         // whenever a newline arrives as a standalone token.
@@ -228,7 +283,7 @@ final class ChatViewModel: ObservableObject {
         streamingAssistantID = nil
         pendingImage = nil
         sessionStore.reset(messages: messages)
-        Task { await engine.unload() }
+        handleSelectionChange()
     }
 
     func startDemo(prompt: String) {
@@ -250,7 +305,8 @@ final class ChatViewModel: ObservableObject {
         // Keep images smaller on iPhone to avoid huge mtmd/KV allocations.
         // Keep multimodal images small enough so visual tokens fit in a single batch on-device.
         // This is a stability tradeoff for iPhone memory / mtmd batching.
-        let scaled = image.scaledDown(maxDimension: 768)
+        let maxImageDimension: CGFloat = modelStore.activeModel()?.isMiniCPMV46 == true ? 512 : 768
+        let scaled = image.scaledDown(maxDimension: maxImageDimension)
         guard let data = scaled.jpegData(compressionQuality: 0.9) else {
             throw NSError(domain: "PocketLLM", code: 2, userInfo: [NSLocalizedDescriptionKey: "JPEG encoding failed"])
         }
@@ -268,13 +324,16 @@ final class ChatViewModel: ObservableObject {
         }
 
         let mmprojURL = modelStore.compatibleActiveMMProjURL()
+        let activeModel = modelStore.activeModel()
+        let isMiniCPMV46 = activeModel?.isMiniCPMV46 == true
         let contextLength = settings.contextLength
         let temperature = settings.temperature
-        let topK = settings.topK
-        let topP = settings.topP
-        let presencePenalty = settings.presencePenalty
-        let frequencyPenalty = settings.frequencyPenalty
+        let topK = isMiniCPMV46 ? Int32(0) : settings.topK
+        let topP = isMiniCPMV46 ? Float(1.0) : settings.topP
+        let presencePenalty = isMiniCPMV46 ? Float(0.0) : settings.presencePenalty
+        let frequencyPenalty = isMiniCPMV46 ? Float(0.0) : settings.frequencyPenalty
         let seed = settings.seed
+        let imageMaxSlices = isMiniCPMV46 ? settings.miniCPMV46ImageSlices : 9
 
         preloadTask = Task {
             do {
@@ -287,7 +346,8 @@ final class ChatViewModel: ObservableObject {
                     presencePenalty: presencePenalty,
                     frequencyPenalty: frequencyPenalty,
                     mmprojURL: mmprojURL,
-                    seed: seed
+                    seed: seed,
+                    imageMaxSlices: imageMaxSlices
                 )
                 await MainActor.run {
                     guard self.selectionRequestID == requestID else { return }
@@ -342,6 +402,7 @@ actor LLMEngine {
     private var loadedFrequencyPenalty: Float?
     private var loadedMMProjPath: String?
     private var loadedSeed: UInt32?
+    private var loadedImageMaxSlices: Int32?
 
     func loadIfNeeded(
         modelURL: URL,
@@ -352,7 +413,8 @@ actor LLMEngine {
         presencePenalty: Float,
         frequencyPenalty: Float,
         mmprojURL: URL?,
-        seed: UInt32
+        seed: UInt32,
+        imageMaxSlices: Int32
     ) async throws {
         let path = modelURL.path
         let mmprojPath = mmprojURL?.path
@@ -361,6 +423,7 @@ actor LLMEngine {
             || (loadedModelPath != path)
             || (loadedContextLength != contextLength)
             || (loadedMMProjPath != mmprojPath)
+            || (loadedImageMaxSlices != imageMaxSlices)
 
         if needsReload {
             await unload()
@@ -374,7 +437,8 @@ actor LLMEngine {
                 presencePenalty: presencePenalty,
                 frequencyPenalty: frequencyPenalty,
                 mmprojPath: mmprojPath,
-                seed: seed
+                seed: seed,
+                imageMaxSlices: imageMaxSlices
             )
 
             loadedModelPath = path
@@ -386,6 +450,7 @@ actor LLMEngine {
             loadedFrequencyPenalty = frequencyPenalty
             loadedMMProjPath = mmprojPath
             loadedSeed = seed
+            loadedImageMaxSlices = imageMaxSlices
             return
         }
 
@@ -539,6 +604,7 @@ actor LLMEngine {
         loadedFrequencyPenalty = nil
         loadedMMProjPath = nil
         loadedSeed = nil
+        loadedImageMaxSlices = nil
     }
 }
 
@@ -574,7 +640,11 @@ enum PromptBuilder {
             enrichedSystem += "\n\nRelevant context from earlier in this session:\n\(relatedSummary)"
         }
 
-        var out = "<|im_start|>system\n\(enrichedSystem)\n<|im_end|>\n"
+        var out = ""
+        if style == .chatML {
+            out += "<|im_start|>system\n\(enrichedSystem)\n<|im_end|>\n"
+        }
+
         for round in recentRounds {
             let m = round.user
             switch m.role {

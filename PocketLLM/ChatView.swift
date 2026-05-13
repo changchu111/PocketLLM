@@ -41,6 +41,7 @@ private struct ChatSurface: View {
 
     @FocusState private var isComposerFocused: Bool
     @State private var showingCamera = false
+    @State private var showingModelSettings = false
 
     private var visibleMessages: [ChatMessage] {
         viewModel.messages.filter { $0.role != .system }
@@ -49,6 +50,10 @@ private struct ChatSurface: View {
     var body: some View {
         ZStack {
             VStack(spacing: 0) {
+                ChatModelSelector(viewModel: viewModel)
+                    .padding(.horizontal)
+                    .padding(.top, 10)
+
                 if introTitle != nil || introText != nil || requiresImage {
                     DemoIntroCard(title: introTitle, text: introText, requiresImage: requiresImage)
                         .padding(.horizontal)
@@ -123,14 +128,28 @@ private struct ChatSurface: View {
         }
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            viewModel.prepareForChat()
+        }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button {
-                    viewModel.clearChat()
-                } label: {
-                    Image(systemName: "eraser")
+                HStack(spacing: 14) {
+                    Button {
+                        showingModelSettings = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+
+                    Button {
+                        viewModel.clearChat()
+                    } label: {
+                        Image(systemName: "eraser")
+                    }
                 }
             }
+        }
+        .sheet(isPresented: $showingModelSettings) {
+            ModelSettingsSheet(viewModel: viewModel)
         }
         .fullScreenCover(isPresented: $showingCamera) {
             CameraScreen(
@@ -140,6 +159,97 @@ private struct ChatSurface: View {
                     showingCamera = false
                 }
             )
+        }
+    }
+}
+
+private struct ChatModelSelector: View {
+    @ObservedObject var viewModel: ChatViewModel
+
+    var body: some View {
+        Menu {
+            if viewModel.installedModels.isEmpty {
+                Text("没有已安装模型")
+            } else {
+                ForEach(viewModel.installedModels) { model in
+                    Button {
+                        viewModel.selectModel(model)
+                    } label: {
+                        Label(model.name, systemImage: model.name == viewModel.activeModelName ? "checkmark" : "circle")
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "cpu")
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("当前模型")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(viewModel.activeModelName)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                }
+                Spacer()
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct ModelSettingsSheet: View {
+    @ObservedObject var viewModel: ChatViewModel
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("当前模型") {
+                    Text(viewModel.activeModelName)
+                }
+
+                if viewModel.activeModelIsMiniCPMV46 {
+                    Section("MiniCPM-V 4.6") {
+                        HStack {
+                            Text("图片切片数")
+                            Spacer()
+                            Text("\(viewModel.miniCPMV46ImageSlices)")
+                                .foregroundStyle(.secondary)
+                                .monospacedDigit()
+                        }
+                        Stepper(value: Binding(get: {
+                            Int(viewModel.miniCPMV46ImageSlices)
+                        }, set: { newValue in
+                            viewModel.miniCPMV46ImageSlices = Int32(newValue)
+                        }), in: 1...9) {
+                            Text("调整")
+                        }
+                        Text("切片越多越利于识别细节，但会增加图片编码和推理耗时。")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Section("配置项") {
+                        Text("当前模型没有配置项")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .navigationTitle("模型设置")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("完成") {
+                        dismiss()
+                    }
+                }
+            }
         }
     }
 }

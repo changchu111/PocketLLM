@@ -13,4 +13,6 @@ final class GenerationSettings: ObservableObject {
     @Published var frequencyPenalty: Float = 0.3
 
     @Published var seed: UInt32 = 1234
+
+    @Published var miniCPMV46ImageSlices: Int32 = 9
 }
