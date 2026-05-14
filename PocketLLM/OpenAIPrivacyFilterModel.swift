@@ -11,16 +11,16 @@ actor OpenAIPrivacyFilterModel {
         case failed(String)
     }
 
-    private struct Artifact {
+    struct Artifact {
         let remotePath: String
         let localPath: String
     }
 
-    private static let repoBaseURLs = [
+    static let repoBaseURLs = [
         URL(string: "https://hf-mirror.com/openai/privacy-filter/resolve/main")!,
         URL(string: "https://huggingface.co/openai/privacy-filter/resolve/main")!
     ]
-    private static let artifacts: [Artifact] = [
+    static let artifacts: [Artifact] = [
         Artifact(remotePath: "config.json", localPath: "config.json"),
         Artifact(remotePath: "tokenizer.json", localPath: "tokenizer.json"),
         Artifact(remotePath: "tokenizer_config.json", localPath: "tokenizer_config.json"),
@@ -137,7 +137,7 @@ actor OpenAIPrivacyFilterModel {
             let destinationURL = modelDirectory.appendingPathComponent(artifact.localPath)
             try fileManager.createDirectory(at: destinationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
 
-            let temporaryURL = try await download(artifact: artifact)
+            let temporaryURL = try await Self.download(artifact: artifact)
 
             if fileManager.fileExists(atPath: destinationURL.path) {
                 try fileManager.removeItem(at: destinationURL)
@@ -150,7 +150,7 @@ actor OpenAIPrivacyFilterModel {
         await progress(state)
     }
 
-    private func download(artifact: Artifact) async throws -> URL {
+    static func download(artifact: Artifact) async throws -> URL {
         var lastError: Error?
 
         for baseURL in Self.repoBaseURLs {
