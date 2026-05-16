@@ -18,6 +18,7 @@ struct ModelDescriptor: Identifiable, Equatable {
 
     enum Organization: String, CaseIterable, Equatable, Hashable, Identifiable {
         case qwen
+        case google
         case openBMB
         case openAI
         case custom
@@ -27,6 +28,7 @@ struct ModelDescriptor: Identifiable, Equatable {
         var displayName: String {
             switch self {
             case .qwen: return "Qwen"
+            case .google: return "Google"
             case .openBMB: return "OpenBMB"
             case .openAI: return "OpenAI"
             case .custom: return "Custom"
@@ -36,6 +38,7 @@ struct ModelDescriptor: Identifiable, Equatable {
         var logoAssetName: String? {
             switch self {
             case .qwen: return "QwenLogo"
+            case .google: return "GoogleLogo"
             case .openBMB: return "OpenBMBLogo"
             case .openAI: return "OpenAILogo"
             case .custom: return nil
@@ -45,6 +48,7 @@ struct ModelDescriptor: Identifiable, Equatable {
         var fallbackSymbol: String {
             switch self {
             case .qwen: return "sparkles"
+            case .google: return "g.circle"
             case .openBMB: return "cube.transparent"
             case .openAI: return "swirl.circle.righthalf.filled"
             case .custom: return "folder"
@@ -102,6 +106,30 @@ struct ModelDescriptor: Identifiable, Equatable {
     }
 }
 
+extension String {
+    var quantizationDisplayName: String {
+        var name = self
+        let replacements = [
+            "(Q4_K_M)": "(4bit)",
+            "(Q4_K_S)": "(4bit)",
+            "(Q4_0)": "(4bit)",
+            "(Q4_1)": "(4bit)",
+            "(Q5_K_M)": "(5bit)",
+            "(Q5_K_S)": "(5bit)",
+            "(Q5_0)": "(5bit)",
+            "(Q5_1)": "(5bit)",
+            "(Q6_K)": "(6bit)",
+            "(Q8_0)": "(8bit)",
+            "(F16)": "(16bit)"
+        ]
+
+        for (source, replacement) in replacements {
+            name = name.replacingOccurrences(of: source, with: replacement)
+        }
+        return name
+    }
+}
+
 @MainActor
 final class ModelStore: ObservableObject {
     @Published private(set) var installed: [ModelDescriptor] = []
@@ -117,6 +145,8 @@ final class ModelStore: ObservableObject {
     @Published var downloadState: [String: DownloadState] = [:]
 
     private static let privacyFilterID = "openai/privacy-filter"
+    private var downloadTasks: [String: URLSessionDownloadTask] = [:]
+    private var privacyDownloadTasks: [String: Task<Void, Never>] = [:]
 
     struct DownloadState: Equatable {
         var progress: Double
@@ -249,6 +279,7 @@ final class ModelStore: ObservableObject {
         let url = model.localURL
         try FileManager.default.removeItem(at: url)
         if let pairedID = model.pairedMMProjID,
+           canDeletePairedMMProj(pairedID, excluding: model.id),
            let paired = installed.first(where: { $0.id == pairedID && $0.kind == .mmproj }),
            FileManager.default.fileExists(atPath: paired.localURL.path) {
             try FileManager.default.removeItem(at: paired.localURL)
@@ -281,8 +312,30 @@ final class ModelStore: ObservableObject {
         }
     }
 
+    func cancelDownload(_ model: ModelDescriptor) {
+        if model.kind == .privacyFilter {
+            privacyDownloadTasks[model.id]?.cancel()
+            privacyDownloadTasks[model.id] = nil
+            downloadState[model.id] = .init(progress: 0, status: .idle)
+            return
+        }
+
+        cancelSingleDownload(model.id)
+
+        if let pairedID = model.pairedMMProjID {
+            cancelSingleDownload(pairedID)
+        }
+    }
+
+    private func cancelSingleDownload(_ id: String) {
+        downloadTasks[id]?.cancel()
+        downloadTasks[id] = nil
+        downloadState[id] = .init(progress: 0, status: .idle)
+    }
+
     private func downloadSingle(_ model: ModelDescriptor) {
         guard case let .remote(url) = model.source else { return }
+        guard downloadTasks[model.id] == nil else { return }
         let destination = FileLocations.modelFileURL(filename: model.filename)
 
         if FileManager.default.fileExists(atPath: destination.path) {
@@ -295,7 +348,13 @@ final class ModelStore: ObservableObject {
 
         let task = URLSession.shared.downloadTask(with: url) { tmp, response, error in
             Task { @MainActor in
+                self.downloadTasks[model.id] = nil
+
                 if let error {
+                    if (error as NSError).code == NSURLErrorCancelled {
+                        self.downloadState[model.id] = .init(progress: 0.0, status: .idle)
+                        return
+                    }
                     self.downloadState[model.id] = .init(progress: 0.0, status: .failed(error.localizedDescription))
                     return
                 }
@@ -336,13 +395,18 @@ final class ModelStore: ObservableObject {
 
         // Keep observation alive for task lifetime.
         task.taskDescription = "PocketLLM.download.\(model.id)"
+        downloadTasks[model.id] = task
         DownloadObservationStore.shared.set(observation, for: task)
 
         task.resume()
     }
 
     private func downloadPrivacyFilter(_ model: ModelDescriptor) {
-        Task { @MainActor in
+        guard privacyDownloadTasks[model.id] == nil else { return }
+
+        let task = Task { @MainActor in
+            defer { privacyDownloadTasks[model.id] = nil }
+
             do {
                 let modelDirectory = try FileLocations.privacyFilterDirectory(create: true)
                 let missing = OpenAIPrivacyFilterModel.artifacts.filter { artifact in
@@ -356,6 +420,8 @@ final class ModelStore: ObservableObject {
                 }
 
                 for (index, artifact) in missing.enumerated() {
+                    try Task.checkCancellation()
+
                     downloadState[model.id] = .init(
                         progress: Double(index) / Double(missing.count),
                         status: .downloading
@@ -374,10 +440,14 @@ final class ModelStore: ObservableObject {
 
                 downloadState[model.id] = .init(progress: 1, status: .downloaded)
                 refreshInstalled()
+            } catch is CancellationError {
+                downloadState[model.id] = .init(progress: 0, status: .idle)
             } catch {
                 downloadState[model.id] = .init(progress: 0, status: .failed(error.localizedDescription))
             }
         }
+
+        privacyDownloadTasks[model.id] = task
     }
 
     func addCustomModel(name: String, urlString: String, filename: String? = nil) {
@@ -444,12 +514,17 @@ final class ModelStore: ObservableObject {
         guard model.kind == .model, let pairedID = model.pairedMMProjID else { return false }
         let hasModel = installed.contains(where: { $0.id == model.id && $0.kind == .model })
         let hasProjector = installed.contains(where: { $0.id == pairedID && $0.kind == .mmproj })
-        return hasModel != hasProjector
+        return hasModel && hasProjector == false
     }
 
     func deletePartialDownload(for model: ModelDescriptor) throws {
         guard model.kind == .model else { return }
-        let candidates = [model.id, model.pairedMMProjID].compactMap { $0 }
+        var candidates = [model.id]
+        if let pairedID = model.pairedMMProjID,
+           canDeletePairedMMProj(pairedID, excluding: model.id) {
+            candidates.append(pairedID)
+        }
+
         for candidateID in candidates {
             guard let installedModel = installed.first(where: { $0.id == candidateID }) else { continue }
             if FileManager.default.fileExists(atPath: installedModel.localURL.path) {
@@ -457,6 +532,14 @@ final class ModelStore: ObservableObject {
             }
         }
         refreshInstalled()
+    }
+
+    private func canDeletePairedMMProj(_ pairedID: String, excluding modelID: String) -> Bool {
+        installed.contains { installedModel in
+            installedModel.kind == .model
+                && installedModel.id != modelID
+                && installedModel.pairedMMProjID == pairedID
+        } == false
     }
 
     private func isPrivacyFilterInstalled() -> Bool {
@@ -500,11 +583,43 @@ final class ModelStore: ObservableObject {
             releaseMonth: "2026-01",
             description: "Qwen vision-language GGUF with projector dependency"
         )
-        let miniCPMV46Metadata = ModelDescriptor.Metadata(
+        let gemma4E2BMetadata = ModelDescriptor.Metadata(
+            category: .vlm,
+            organization: .google,
+            parameterCount: "2.3B",
+            modelSize: "约 3.11 GB",
+            releaseMonth: "2026-04",
+            description: "Unsloth GGUF conversion of Google Gemma 4 E2B Instruct VLM"
+        )
+        let gemma4E4BMetadata = ModelDescriptor.Metadata(
+            category: .vlm,
+            organization: .google,
+            parameterCount: "4.5B",
+            modelSize: "约 4.98 GB",
+            releaseMonth: "2026-04",
+            description: "Unsloth GGUF conversion of Google Gemma 4 E4B Instruct VLM"
+        )
+        let miniCPMV46Q4Metadata = ModelDescriptor.Metadata(
             category: .vlm,
             organization: .openBMB,
-            parameterCount: "8B",
-            modelSize: "约 5.1 GB",
+            parameterCount: "1.3B",
+            modelSize: "约 529 MB",
+            releaseMonth: "2026-05",
+            description: "MiniCPM-V 4.6 multimodal model for image understanding"
+        )
+        let miniCPMV46Q8Metadata = ModelDescriptor.Metadata(
+            category: .vlm,
+            organization: .openBMB,
+            parameterCount: "1.3B",
+            modelSize: "约 812 MB",
+            releaseMonth: "2026-05",
+            description: "MiniCPM-V 4.6 multimodal model for image understanding"
+        )
+        let miniCPMV46F16Metadata = ModelDescriptor.Metadata(
+            category: .vlm,
+            organization: .openBMB,
+            parameterCount: "1.3B",
+            modelSize: "约 1.52 GB",
             releaseMonth: "2026-05",
             description: "MiniCPM-V 4.6 multimodal model for image understanding"
         )
@@ -530,7 +645,7 @@ final class ModelStore: ObservableObject {
             parameterCount: "8B",
             modelSize: "约 4.8 GB",
             releaseMonth: "2025-06",
-            description: "MiniCPM-V4 multimodal GGUF model"
+            description: "MiniCPM-V 4.0 multimodal GGUF model"
         )
         let privacyMetadata = ModelDescriptor.Metadata(
             category: .privacyFilter,
@@ -560,13 +675,67 @@ final class ModelStore: ObservableObject {
             metadata: qwenVLMMetadata
         )
 
+        let gemma4E2B = ModelDescriptor(
+            id: "gemma-4-E2B-it-Q4_K_M.gguf",
+            name: "Gemma-4-E2B-it（4bit）",
+            filename: "gemma-4-E2B-it-Q4_K_M.gguf",
+            pairedMMProjID: "gemma-4-E2B-it-mmproj-F16.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf")!),
+            metadata: gemma4E2BMetadata
+        )
+
+        let gemma4E2BMMProj = ModelDescriptor(
+            id: "gemma-4-E2B-it-mmproj-F16.gguf",
+            name: "Gemma-4-E2B-it mmproj (F16)",
+            filename: "gemma-4-E2B-it-mmproj-F16.gguf",
+            kind: .mmproj,
+            source: .remote(url: URL(string: "https://hf-mirror.com/unsloth/gemma-4-E2B-it-GGUF/resolve/main/mmproj-F16.gguf")!),
+            metadata: gemma4E2BMetadata
+        )
+
+        let gemma4E4B = ModelDescriptor(
+            id: "gemma-4-E4B-it-Q4_K_M.gguf",
+            name: "Gemma-4-E4B-it（4bit）",
+            filename: "gemma-4-E4B-it-Q4_K_M.gguf",
+            pairedMMProjID: "gemma-4-E4B-it-mmproj-F16.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/unsloth/gemma-4-E4B-it-GGUF/resolve/main/gemma-4-E4B-it-Q4_K_M.gguf")!),
+            metadata: gemma4E4BMetadata
+        )
+
+        let gemma4E4BMMProj = ModelDescriptor(
+            id: "gemma-4-E4B-it-mmproj-F16.gguf",
+            name: "Gemma-4-E4B-it mmproj (F16)",
+            filename: "gemma-4-E4B-it-mmproj-F16.gguf",
+            kind: .mmproj,
+            source: .remote(url: URL(string: "https://hf-mirror.com/unsloth/gemma-4-E4B-it-GGUF/resolve/main/mmproj-F16.gguf")!),
+            metadata: gemma4E4BMetadata
+        )
+
         let miniCPM46 = ModelDescriptor(
             id: "MiniCPM-V-4_6-Q4_K_M.gguf",
             name: "MiniCPM-V 4.6 (Q4_K_M)",
             filename: "MiniCPM-V-4_6-Q4_K_M.gguf",
             pairedMMProjID: "MiniCPM-V-4_6-mmproj-model-f16.gguf",
             source: .remote(url: URL(string: "https://hf-mirror.com/openbmb/MiniCPM-V-4.6-gguf/resolve/main/MiniCPM-V-4_6-Q4_K_M.gguf")!),
-            metadata: miniCPMV46Metadata
+            metadata: miniCPMV46Q4Metadata
+        )
+
+        let miniCPM46Q8 = ModelDescriptor(
+            id: "MiniCPM-V-4_6-Q8_0.gguf",
+            name: "MiniCPM-V 4.6 (Q8_0)",
+            filename: "MiniCPM-V-4_6-Q8_0.gguf",
+            pairedMMProjID: "MiniCPM-V-4_6-mmproj-model-f16.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/openbmb/MiniCPM-V-4.6-gguf/resolve/main/MiniCPM-V-4_6-Q8_0.gguf")!),
+            metadata: miniCPMV46Q8Metadata
+        )
+
+        let miniCPM46F16 = ModelDescriptor(
+            id: "MiniCPM-V-4_6-F16.gguf",
+            name: "MiniCPM-V 4.6 (F16)",
+            filename: "MiniCPM-V-4_6-F16.gguf",
+            pairedMMProjID: "MiniCPM-V-4_6-mmproj-model-f16.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/openbmb/MiniCPM-V-4.6-gguf/resolve/main/MiniCPM-V-4_6-F16.gguf")!),
+            metadata: miniCPMV46F16Metadata
         )
 
         let miniCPM46MMProj = ModelDescriptor(
@@ -575,7 +744,7 @@ final class ModelStore: ObservableObject {
             filename: "MiniCPM-V-4_6-mmproj-model-f16.gguf",
             kind: .mmproj,
             source: .remote(url: URL(string: "https://hf-mirror.com/openbmb/MiniCPM-V-4.6-gguf/resolve/main/mmproj-model-f16.gguf")!),
-            metadata: miniCPMV46Metadata
+            metadata: miniCPMV46Q4Metadata
         )
 
         let miniCPM = ModelDescriptor(
@@ -584,15 +753,6 @@ final class ModelStore: ObservableObject {
             filename: "MiniCPM-V-4_5-Q4_K_M.gguf",
             pairedMMProjID: "mmproj-model-f16.gguf",
             source: .remote(url: URL(string: "https://hf-mirror.com/openbmb/MiniCPM-V-4_5-gguf/resolve/main/MiniCPM-V-4_5-Q4_K_M.gguf")!),
-            metadata: miniCPMV45Metadata
-        )
-
-        let miniCPMQ40 = ModelDescriptor(
-            id: "MiniCPM-V-4_5-Q4_0.gguf",
-            name: "MiniCPM-V 4.5 (Q4_0)",
-            filename: "MiniCPM-V-4_5-Q4_0.gguf",
-            pairedMMProjID: "mmproj-model-f16.gguf",
-            source: .remote(url: URL(string: "https://hf-mirror.com/openbmb/MiniCPM-V-4_5-gguf/resolve/main/MiniCPM-V-4_5-Q4_0.gguf")!),
             metadata: miniCPMV45Metadata
         )
 
@@ -606,7 +766,7 @@ final class ModelStore: ObservableObject {
 
         let miniCPMV4 = ModelDescriptor(
             id: "MiniCPM-V4-Q4_K_M.gguf",
-            name: "MiniCPM-V4 (Q4_K_M)",
+            name: "MiniCPM-V 4.0 (Q4_K_M)",
             filename: "MiniCPM-V4-Q4_K_M.gguf",
             pairedMMProjID: "MiniCPM-V4-mmproj-model-f16.gguf",
             source: .remote(url: URL(string: "https://hf-mirror.com/openbmb/MiniCPM-V-4-gguf/resolve/main/ggml-model-Q4_K_M.gguf")!),
@@ -615,7 +775,7 @@ final class ModelStore: ObservableObject {
 
         let miniCPMV4MMProj = ModelDescriptor(
             id: "MiniCPM-V4-mmproj-model-f16.gguf",
-            name: "MiniCPM-V4 mmproj (F16)",
+            name: "MiniCPM-V 4.0 mmproj (F16)",
             filename: "MiniCPM-V4-mmproj-model-f16.gguf",
             kind: .mmproj,
             source: .remote(url: URL(string: "https://hf-mirror.com/openbmb/MiniCPM-V-4-gguf/resolve/main/mmproj-model-f16.gguf")!),
@@ -640,7 +800,7 @@ final class ModelStore: ObservableObject {
             metadata: privacyMetadata
         )
 
-        catalog = [qwen, qwenMMProj, miniCPM46, miniCPM46MMProj, miniCPM, miniCPMQ40, miniCPM41, miniCPMV4, miniCPMV4MMProj, miniCPMMMProj, privacyFilter]
+        catalog = [qwen, qwenMMProj, gemma4E2B, gemma4E2BMMProj, gemma4E4B, gemma4E4BMMProj, miniCPM46, miniCPM46Q8, miniCPM46F16, miniCPM46MMProj, miniCPM, miniCPM41, miniCPMV4, miniCPMV4MMProj, miniCPMMMProj, privacyFilter]
     }
 
 }
@@ -669,6 +829,11 @@ extension ModelDescriptor {
             || haystack.contains("minicpm-v 4.6")
             || haystack.contains("minicpm-v-4.6")
             || haystack.contains("minicpm-v 4_6")
+    }
+
+    var isGemma4: Bool {
+        let haystack = "\(id) \(filename) \(name)".lowercased()
+        return haystack.contains("gemma-4-e2b") || haystack.contains("gemma-4-e4b")
     }
 }
 

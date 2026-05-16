@@ -1,12 +1,140 @@
 import Foundation
 import Combine
 
+#if canImport(Darwin)
+import Darwin
+#endif
+
 #if canImport(UIKit)
 import UIKit
 typealias PlatformImage = UIImage
 #else
 typealias PlatformImage = Any
 #endif
+
+private struct MemorySnapshot {
+    let footprint: UInt64?
+    let available: UInt64?
+}
+
+private enum MemoryProbe {
+    private static let megabyte: UInt64 = 1024 * 1024
+    private static let pollInterval: UInt64 = 250_000_000
+    private static let minimumWait: TimeInterval = 3.0
+    private static let maximumWait: TimeInterval = 12.0
+    private static let meaningfulChange = 256 * megabyte
+    private static let stableThreshold = 64 * megabyte
+
+    static func snapshot() -> MemorySnapshot {
+        MemorySnapshot(footprint: currentFootprint(), available: currentAvailableMemory())
+    }
+
+    static func waitForRelease(after initial: MemorySnapshot, reason: String) async {
+        let start = CFAbsoluteTimeGetCurrent()
+        var last = snapshot()
+        var lowFootprint = last.footprint ?? initial.footprint
+        var highAvailable = last.available ?? initial.available
+        var stableSamples = 0
+
+        while CFAbsoluteTimeGetCurrent() - start < maximumWait {
+            try? await Task.sleep(nanoseconds: pollInterval)
+            let current = snapshot()
+
+            if let footprint = current.footprint {
+                if lowFootprint == nil || footprint < lowFootprint! {
+                    lowFootprint = footprint
+                }
+            }
+            if let available = current.available {
+                if highAvailable == nil || available > highAvailable! {
+                    highAvailable = available
+                }
+            }
+
+            if isStable(current, comparedTo: last) {
+                stableSamples += 1
+            } else {
+                stableSamples = 0
+            }
+            last = current
+
+            let elapsed = CFAbsoluteTimeGetCurrent() - start
+            guard elapsed >= minimumWait else { continue }
+
+            let footprintReleased = released(from: initial.footprint, to: lowFootprint, direction: .decrease)
+            let availableReleased = released(from: initial.available, to: highAvailable, direction: .increase)
+            if footprintReleased || availableReleased || stableSamples >= 6 {
+                print("Memory release wait (\(reason)) finished after \(String(format: "%.2f", elapsed))s, stableSamples=\(stableSamples), initial=\(describe(initial)), current=\(describe(current))")
+                return
+            }
+        }
+
+        let elapsed = CFAbsoluteTimeGetCurrent() - start
+        print("Memory release wait (\(reason)) timed out after \(String(format: "%.2f", elapsed))s, initial=\(describe(initial)), current=\(describe(last))")
+    }
+
+    private enum Direction {
+        case decrease
+        case increase
+    }
+
+    private static func released(from initial: UInt64?, to observed: UInt64?, direction: Direction) -> Bool {
+        guard let initial, let observed else { return false }
+        switch direction {
+        case .decrease:
+            return initial > observed && initial - observed >= meaningfulChange
+        case .increase:
+            return observed > initial && observed - initial >= meaningfulChange
+        }
+    }
+
+    private static func isStable(_ current: MemorySnapshot, comparedTo previous: MemorySnapshot) -> Bool {
+        let footprintStable = isStable(current.footprint, previous.footprint)
+        let availableStable = isStable(current.available, previous.available)
+        return footprintStable || availableStable
+    }
+
+    private static func isStable(_ current: UInt64?, _ previous: UInt64?) -> Bool {
+        guard let current, let previous else { return false }
+        return current > previous ? current - previous < stableThreshold : previous - current < stableThreshold
+    }
+
+    private static func describe(_ snapshot: MemorySnapshot) -> String {
+        "footprint=\(format(snapshot.footprint)), available=\(format(snapshot.available))"
+    }
+
+    private static func format(_ bytes: UInt64?) -> String {
+        guard let bytes else { return "unknown" }
+        return String(format: "%.0fMB", Double(bytes) / Double(megabyte))
+    }
+
+    private static func currentFootprint() -> UInt64? {
+        #if canImport(Darwin)
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { reboundPointer in
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), reboundPointer, &count)
+            }
+        }
+        guard result == KERN_SUCCESS else { return nil }
+        return UInt64(info.phys_footprint)
+        #else
+        return nil
+        #endif
+    }
+
+    private static func currentAvailableMemory() -> UInt64? {
+        #if canImport(Darwin)
+        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "os_proc_available_memory") else { return nil }
+        typealias AvailableMemoryFunction = @convention(c) () -> UInt64
+        let function = unsafeBitCast(symbol, to: AvailableMemoryFunction.self)
+        return function()
+        #else
+        return nil
+        #endif
+    }
+}
 
 @MainActor
 final class ChatViewModel: ObservableObject {
@@ -19,7 +147,7 @@ final class ChatViewModel: ObservableObject {
     @Published var draft: String = ""
     @Published var isGenerating = false
     @Published var isSwitchingModel = false
-    @Published var modelLoadingMessage: String = "Loading model..."
+    @Published var modelLoadingMessage: String = "模型加载中"
     @Published var errorMessage: String?
     @Published var streamingAssistantID: UUID?
     @Published var pendingImage: PlatformImage?
@@ -32,10 +160,15 @@ final class ChatViewModel: ObservableObject {
     private var generationTask: Task<Void, Never>?
     private var preloadTask: Task<Void, Never>?
     private var selectionRequestID: Int = 0
+    private var isChatActive = false
     private var cancellables = Set<AnyCancellable>()
 
     var activeModelName: String {
-        modelStore.activeModel()?.name ?? "未选择模型"
+        modelStore.activeModel()?.name.quantizationDisplayName ?? "未选择模型"
+    }
+
+    var activeModelID: String? {
+        modelStore.activeModelID
     }
 
     var installedModels: [ModelDescriptor] {
@@ -46,9 +179,82 @@ final class ChatViewModel: ObservableObject {
         modelStore.activeModel()?.isMiniCPMV46 == true
     }
 
+    var activeModelIsGemma4: Bool {
+        modelStore.activeModel()?.isGemma4 == true
+    }
+
+    var activeModelIsVLM: Bool {
+        modelStore.activeModel()?.metadata.category == .vlm
+    }
+
+    var activeModelHasSpecialSettings: Bool {
+        activeModelIsMiniCPMV46
+    }
+
+    var maxNewTokens: Int32 {
+        get { settings.maxNewTokens }
+        set { settings.maxNewTokens = max(16, min(4096, newValue)) }
+    }
+
+    var contextLength: Int32 {
+        get { settings.contextLength }
+        set { settings.contextLength = max(512, min(16384, newValue)) }
+    }
+
+    var temperature: Float {
+        get { settings.temperature }
+        set { settings.temperature = max(0.0, min(1.5, newValue)) }
+    }
+
+    var topK: Int32 {
+        get { settings.topK }
+        set { settings.topK = max(0, min(200, newValue)) }
+    }
+
+    var topP: Float {
+        get { settings.topP }
+        set { settings.topP = max(0.0, min(1.0, newValue)) }
+    }
+
+    var presencePenalty: Float {
+        get { settings.presencePenalty }
+        set { settings.presencePenalty = max(0.0, min(2.0, newValue)) }
+    }
+
+    var frequencyPenalty: Float {
+        get { settings.frequencyPenalty }
+        set { settings.frequencyPenalty = max(0.0, min(2.0, newValue)) }
+    }
+
+    var seed: UInt32 {
+        get { settings.seed }
+        set { settings.seed = newValue }
+    }
+
     var miniCPMV46ImageSlices: Int32 {
         get { settings.miniCPMV46ImageSlices }
         set { settings.miniCPMV46ImageSlices = max(1, min(9, newValue)) }
+    }
+
+    func randomizeSeed() {
+        settings.seed = UInt32.random(in: 1...UInt32.max)
+    }
+
+    var gemmaMaxNewTokens: Int32 { settings.gemmaMaxNewTokens }
+    var gemmaTemperature: Float { settings.gemmaTemperature }
+    var gemmaTopK: Int32 { settings.gemmaTopK }
+    var gemmaTopP: Float { settings.gemmaTopP }
+    var gemmaUseGPU: Bool { settings.gemmaUseGPU }
+    var gemmaThinkingEnabled: Bool { settings.gemmaThinkingEnabled }
+
+    func applyGemmaSettings(maxNewTokens: Int32, temperature: Float, topK: Int32, topP: Float, useGPU: Bool, thinkingEnabled: Bool) {
+        settings.gemmaMaxNewTokens = max(16, min(32000, maxNewTokens))
+        settings.gemmaTemperature = max(0.0, min(2.0, temperature))
+        settings.gemmaTopK = max(0, min(64, topK))
+        settings.gemmaTopP = max(0.0, min(1.0, topP))
+        settings.gemmaUseGPU = useGPU
+        settings.gemmaThinkingEnabled = thinkingEnabled
+        handleSelectionChange()
     }
 
     init(modelStore: ModelStore, settings: GenerationSettings, sessionStore: SessionStore) {
@@ -89,11 +295,14 @@ final class ChatViewModel: ObservableObject {
                 self?.objectWillChange.send()
             }
             .store(in: &cancellables)
-
-        handleSelectionChange()
     }
 
     func setPendingImage(_ image: PlatformImage) {
+        guard activeModelIsVLM else {
+            errorMessage = "当前文本模型不支持图片输入。请选择视觉模型后再上传图片。"
+            pendingImage = nil
+            return
+        }
         pendingImage = image
     }
 
@@ -102,19 +311,56 @@ final class ChatViewModel: ObservableObject {
     }
 
     func selectModel(_ model: ModelDescriptor) {
+        if model.id != modelStore.activeModelID {
+            messages = Self.defaultMessages
+            draft = ""
+            errorMessage = nil
+            streamingAssistantID = nil
+            pendingImage = nil
+            sessionStore.reset(messages: messages)
+        }
         modelStore.setActiveModel(model)
     }
 
     func prepareForChat() {
+        isChatActive = true
         guard modelStore.activeModelURL() != nil else { return }
-        if isSwitchingModel { return }
-        schedulePreloadForCurrentSelection(requestID: selectionRequestID)
+        guard isSwitchingModel == false else { return }
+
+        selectionRequestID += 1
+        let requestID = selectionRequestID
+
+        preloadTask?.cancel()
+        isSwitchingModel = true
+        modelLoadingMessage = "模型加载中"
+        preloadTask = Task { @MainActor in
+            do {
+                try await self.loadActiveModelForCurrentSelection()
+                guard self.selectionRequestID == requestID else { return }
+                self.isSwitchingModel = false
+            } catch is CancellationError {
+                // chat disappeared or selection changed
+            } catch {
+                guard self.selectionRequestID == requestID else { return }
+                self.errorMessage = error.localizedDescription
+                self.isSwitchingModel = false
+            }
+        }
+    }
+
+    func leaveChat() {
+        isChatActive = false
     }
 
     func send() {
         let requestStartedAt = CFAbsoluteTimeGetCurrent()
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         let image = pendingImage
+        if image != nil, activeModelIsVLM == false {
+            pendingImage = nil
+            errorMessage = "当前文本模型不支持图片输入。请选择视觉模型后再上传图片。"
+            return
+        }
         guard !text.isEmpty || image != nil else { return }
         draft = ""
         errorMessage = nil
@@ -161,33 +407,42 @@ final class ChatViewModel: ObservableObject {
 
         generationTask = Task { @MainActor in
             do {
+                let pendingPreloadTask = preloadTask
+                await pendingPreloadTask?.value
+                try Task.checkCancellation()
+
                 let activeModel = modelStore.activeModel()
                 let isMiniCPMV46 = activeModel?.isMiniCPMV46 == true
+                let isGemma4 = activeModel?.isGemma4 == true
+                let effectiveTemperature = isGemma4 ? settings.gemmaTemperature : settings.temperature
                 let effectiveTopK = isMiniCPMV46 ? Int32(0) : settings.topK
                 let effectiveTopP = isMiniCPMV46 ? Float(1.0) : settings.topP
                 let effectivePresencePenalty = isMiniCPMV46 ? Float(0.0) : settings.presencePenalty
                 let effectiveFrequencyPenalty = isMiniCPMV46 ? Float(0.0) : settings.frequencyPenalty
+                let effectiveUseGPU = isGemma4 ? settings.gemmaUseGPU : true
 
                 try await engine.loadIfNeeded(
                     modelURL: modelURL,
                     contextLength: settings.contextLength,
-                    temperature: settings.temperature,
-                    topK: effectiveTopK,
-                    topP: effectiveTopP,
+                    temperature: effectiveTemperature,
+                    topK: isGemma4 ? settings.gemmaTopK : effectiveTopK,
+                    topP: isGemma4 ? settings.gemmaTopP : effectiveTopP,
                     presencePenalty: effectivePresencePenalty,
                     frequencyPenalty: effectiveFrequencyPenalty,
                     mmprojURL: mmprojURL,
                     seed: settings.seed,
-                    imageMaxSlices: isMiniCPMV46 ? settings.miniCPMV46ImageSlices : 9
+                    imageMaxSlices: isMiniCPMV46 ? settings.miniCPMV46ImageSlices : 9,
+                    useGPU: effectiveUseGPU
                 )
 
         let prompt = PromptBuilder.buildPrompt(
             from: promptSnapshot,
             style: activeModel?.promptStyle ?? .chatML,
             activeImageMessageID: imageURL != nil ? userMessageID : nil,
-            maxRecentRounds: 2
+            maxRecentRounds: 2,
+            gemmaThinkingEnabled: isGemma4 && settings.gemmaThinkingEnabled
         )
-                let maxNewTokens = settings.maxNewTokens
+                let maxNewTokens = isGemma4 ? settings.gemmaMaxNewTokens : settings.maxNewTokens
                 let metrics = try await engine.generate(prompt: prompt, imageURL: imageURL, maxNewTokens: maxNewTokens, requestStartedAt: requestStartedAt) { token in
                     if let idx = self.messages.firstIndex(where: { $0.id == assistantID }) {
                         // Streaming: do NOT trim trailing newlines, otherwise list formatting breaks
@@ -220,23 +475,21 @@ final class ChatViewModel: ObservableObject {
 
     func stop() {
         generationTask?.cancel()
-        generationTask = nil
         Task { await engine.stop() }
         isGenerating = false
         streamingAssistantID = nil
     }
 
-    private func handleSelectionChange() {
+    private func handleSelectionChange(loadingMessage: String? = nil) {
         selectionRequestID += 1
         let requestID = selectionRequestID
 
         guard modelStore.activeModelURL() != nil else {
             isSwitchingModel = false
-            modelLoadingMessage = "Loading model..."
+            modelLoadingMessage = "模型加载中"
             let previousGenerationTask = generationTask
             let previousPreloadTask = preloadTask
             generationTask?.cancel()
-            generationTask = nil
             isGenerating = false
             streamingAssistantID = nil
 
@@ -246,21 +499,28 @@ final class ChatViewModel: ObservableObject {
                 await previousGenerationTask?.value
                 await previousPreloadTask?.value
                 await engine.unload()
+                guard self.selectionRequestID == requestID else { return }
+                self.isSwitchingModel = false
             }
             return
         }
 
+        guard isChatActive else {
+            isSwitchingModel = false
+            modelLoadingMessage = "模型加载中"
+            return
+        }
+
         isSwitchingModel = true
-        if let model = modelStore.activeModel() {
-            modelLoadingMessage = "Loading \(model.name)..."
+        if let loadingMessage {
+            modelLoadingMessage = loadingMessage
         } else {
-            modelLoadingMessage = "Loading model..."
+            modelLoadingMessage = "模型加载中"
         }
 
         let previousGenerationTask = generationTask
         let previousPreloadTask = preloadTask
         generationTask?.cancel()
-        generationTask = nil
         isGenerating = false
         streamingAssistantID = nil
 
@@ -269,10 +529,24 @@ final class ChatViewModel: ObservableObject {
             await engine.stop()
             await previousGenerationTask?.value
             await previousPreloadTask?.value
+            let memoryBeforeUnload = MemoryProbe.snapshot()
             await engine.unload()
-            try? await Task.sleep(nanoseconds: 200_000_000)
             guard self.selectionRequestID == requestID else { return }
-            self.schedulePreloadForCurrentSelection(requestID: requestID)
+            await MemoryProbe.waitForRelease(after: memoryBeforeUnload, reason: "model switch")
+            guard self.selectionRequestID == requestID else { return }
+
+            self.modelLoadingMessage = "模型加载中"
+            do {
+                try await self.loadActiveModelForCurrentSelection()
+                guard self.selectionRequestID == requestID else { return }
+                self.isSwitchingModel = false
+            } catch is CancellationError {
+                // selection changed again
+            } catch {
+                guard self.selectionRequestID == requestID else { return }
+                self.errorMessage = error.localizedDescription
+                self.isSwitchingModel = false
+            }
         }
     }
 
@@ -283,7 +557,7 @@ final class ChatViewModel: ObservableObject {
         streamingAssistantID = nil
         pendingImage = nil
         sessionStore.reset(messages: messages)
-        handleSelectionChange()
+        handleSelectionChange(loadingMessage: "清空对话和模型加载中")
     }
 
     func startDemo(prompt: String) {
@@ -317,55 +591,36 @@ final class ChatViewModel: ObservableObject {
         return ChatAttachment(type: .image, localPath: url.path)
     }
 
-    private func schedulePreloadForCurrentSelection(requestID: Int) {
-        guard let modelURL = modelStore.activeModelURL() else {
-            preloadTask = Task { await engine.unload() }
-            return
-        }
+    private func loadActiveModelForCurrentSelection() async throws {
+        guard let modelURL = modelStore.activeModelURL() else { return }
 
         let mmprojURL = modelStore.compatibleActiveMMProjURL()
         let activeModel = modelStore.activeModel()
         let isMiniCPMV46 = activeModel?.isMiniCPMV46 == true
-        let contextLength = settings.contextLength
-        let temperature = settings.temperature
-        let topK = isMiniCPMV46 ? Int32(0) : settings.topK
-        let topP = isMiniCPMV46 ? Float(1.0) : settings.topP
+        let isGemma4 = activeModel?.isGemma4 == true
+        let temperature = isGemma4 ? settings.gemmaTemperature : settings.temperature
+        let topK = isGemma4 ? settings.gemmaTopK : (isMiniCPMV46 ? Int32(0) : settings.topK)
+        let topP = isGemma4 ? settings.gemmaTopP : (isMiniCPMV46 ? Float(1.0) : settings.topP)
         let presencePenalty = isMiniCPMV46 ? Float(0.0) : settings.presencePenalty
         let frequencyPenalty = isMiniCPMV46 ? Float(0.0) : settings.frequencyPenalty
-        let seed = settings.seed
         let imageMaxSlices = isMiniCPMV46 ? settings.miniCPMV46ImageSlices : 9
+        let useGPU = isGemma4 ? settings.gemmaUseGPU : true
 
-        preloadTask = Task {
-            do {
-                try await engine.loadIfNeeded(
-                    modelURL: modelURL,
-                    contextLength: contextLength,
-                    temperature: temperature,
-                    topK: topK,
-                    topP: topP,
-                    presencePenalty: presencePenalty,
-                    frequencyPenalty: frequencyPenalty,
-                    mmprojURL: mmprojURL,
-                    seed: seed,
-                    imageMaxSlices: imageMaxSlices
-                )
-                await MainActor.run {
-                    guard self.selectionRequestID == requestID else { return }
-                    self.isSwitchingModel = false
-                    self.modelLoadingMessage = "Loading model..."
-                }
-            } catch is CancellationError {
-                // selection changed again
-            } catch {
-                await MainActor.run {
-                    guard self.selectionRequestID == requestID else { return }
-                    self.errorMessage = error.localizedDescription
-                    self.isSwitchingModel = false
-                    self.modelLoadingMessage = "Loading model..."
-                }
-            }
-        }
+        try await engine.loadIfNeeded(
+            modelURL: modelURL,
+            contextLength: settings.contextLength,
+            temperature: temperature,
+            topK: topK,
+            topP: topP,
+            presencePenalty: presencePenalty,
+            frequencyPenalty: frequencyPenalty,
+            mmprojURL: mmprojURL,
+            seed: settings.seed,
+            imageMaxSlices: imageMaxSlices,
+            useGPU: useGPU
+        )
     }
+
 }
 
 private extension UIImage {
@@ -403,6 +658,10 @@ actor LLMEngine {
     private var loadedMMProjPath: String?
     private var loadedSeed: UInt32?
     private var loadedImageMaxSlices: Int32?
+    private var loadedUseGPU: Bool?
+    private var lifecycleOperationID = UUID()
+    private var contextCloseTask: Task<Void, Never>?
+    private var contextCloseTaskID: UUID?
 
     func loadIfNeeded(
         modelURL: URL,
@@ -414,32 +673,52 @@ actor LLMEngine {
         frequencyPenalty: Float,
         mmprojURL: URL?,
         seed: UInt32,
-        imageMaxSlices: Int32
+        imageMaxSlices: Int32,
+        useGPU: Bool
     ) async throws {
         let path = modelURL.path
         let mmprojPath = mmprojURL?.path
+        await waitForContextCloseIfNeeded()
 
         let needsReload = (ctx == nil)
             || (loadedModelPath != path)
             || (loadedContextLength != contextLength)
             || (loadedMMProjPath != mmprojPath)
             || (loadedImageMaxSlices != imageMaxSlices)
+            || (loadedUseGPU != useGPU)
 
         if needsReload {
-            await unload()
+            let operationID = UUID()
+            lifecycleOperationID = operationID
+            let memoryBeforeUnload = MemoryProbe.snapshot()
+            let didUnloadContext = await unloadCurrentContext()
+            try Task.checkCancellation()
+            guard lifecycleOperationID == operationID else { throw CancellationError() }
+            if didUnloadContext {
+                await MemoryProbe.waitForRelease(after: memoryBeforeUnload, reason: "engine reload")
+                try Task.checkCancellation()
+                guard lifecycleOperationID == operationID else { throw CancellationError() }
+            }
 
-            ctx = try LlamaContext.create_context(
-                path: path,
-                contextLength: contextLength,
-                temperature: temperature,
-                topK: topK,
-                topP: topP,
-                presencePenalty: presencePenalty,
-                frequencyPenalty: frequencyPenalty,
-                mmprojPath: mmprojPath,
-                seed: seed,
-                imageMaxSlices: imageMaxSlices
-            )
+            let nextContext = try autoreleasepool {
+                try LlamaContext.create_context(
+                    path: path,
+                    contextLength: contextLength,
+                    temperature: temperature,
+                    topK: topK,
+                    topP: topP,
+                    presencePenalty: presencePenalty,
+                    frequencyPenalty: frequencyPenalty,
+                    mmprojPath: mmprojPath,
+                    seed: seed,
+                    imageMaxSlices: imageMaxSlices,
+                    useGPU: useGPU
+                )
+            }
+            try Task.checkCancellation()
+            guard lifecycleOperationID == operationID else { throw CancellationError() }
+
+            ctx = nextContext
 
             loadedModelPath = path
             loadedContextLength = contextLength
@@ -451,6 +730,7 @@ actor LLMEngine {
             loadedMMProjPath = mmprojPath
             loadedSeed = seed
             loadedImageMaxSlices = imageMaxSlices
+            loadedUseGPU = useGPU
             return
         }
 
@@ -590,10 +870,15 @@ actor LLMEngine {
     }
 
     func unload() async {
-        if let ctx {
-            await ctx.requestStop()
-            await ctx.clear()
-        }
+        lifecycleOperationID = UUID()
+        await unloadCurrentContext()
+    }
+
+    @discardableResult
+    private func unloadCurrentContext() async -> Bool {
+        await waitForContextCloseIfNeeded()
+
+        let currentContext = ctx
         ctx = nil
         loadedModelPath = nil
         loadedContextLength = nil
@@ -605,6 +890,33 @@ actor LLMEngine {
         loadedMMProjPath = nil
         loadedSeed = nil
         loadedImageMaxSlices = nil
+        loadedUseGPU = nil
+
+        if let currentContext {
+            let closeID = UUID()
+            let closeTask = Task {
+                await currentContext.requestStop()
+                await currentContext.close()
+            }
+            contextCloseTask = closeTask
+            contextCloseTaskID = closeID
+            await closeTask.value
+            if contextCloseTaskID == closeID {
+                contextCloseTask = nil
+                contextCloseTaskID = nil
+            }
+            return true
+        }
+        return false
+    }
+
+    private func waitForContextCloseIfNeeded() async {
+        guard let closeTask = contextCloseTask, let closeID = contextCloseTaskID else { return }
+        await closeTask.value
+        if contextCloseTaskID == closeID {
+            contextCloseTask = nil
+            contextCloseTaskID = nil
+        }
     }
 }
 
@@ -614,7 +926,7 @@ enum PromptBuilder {
         case miniCPMV4
     }
 
-    static func buildPrompt(from messages: [ChatMessage], style: Style = .chatML, activeImageMessageID: UUID? = nil, maxRecentRounds: Int = 3) -> String {
+    static func buildPrompt(from messages: [ChatMessage], style: Style = .chatML, activeImageMessageID: UUID? = nil, maxRecentRounds: Int = 3, gemmaThinkingEnabled: Bool = false) -> String {
         let system = messages.first(where: { $0.role == .system })?.text ?? ChatViewModel.defaultSystemPrompt
         let rounds = ConversationContextBuilder.rounds(from: messages)
         let currentUserText = rounds.last?.user.text ?? ""
@@ -636,6 +948,9 @@ enum PromptBuilder {
         }
 
         var enrichedSystem = system
+        if gemmaThinkingEnabled {
+            enrichedSystem = "<|think|>\n" + enrichedSystem
+        }
         if !relatedSummary.isEmpty {
             enrichedSystem += "\n\nRelevant context from earlier in this session:\n\(relatedSummary)"
         }
@@ -796,6 +1111,8 @@ extension PromptBuilder {
             }
         }
 
+        s = stripGemmaThoughtChannel(s)
+
         // Hide <think> blocks from the visible transcript.
         s = stripThinkBlocks(s)
 
@@ -844,6 +1161,24 @@ extension PromptBuilder {
 
         // If anything still left (e.g. "<think>" literal), remove it.
         s = s.replacingOccurrences(of: "<think>", with: "")
+        return s
+    }
+
+    private static func stripGemmaThoughtChannel(_ input: String) -> String {
+        var s = input
+        let startTokens = ["<|channel|>thought", "<|channel>thought"]
+        let endTokens = ["<|channel|>final", "<|channel>final", "<channel|>"]
+
+        while let start = startTokens.compactMap({ s.range(of: $0) }).min(by: { $0.lowerBound < $1.lowerBound }) {
+            let searchRange = start.upperBound..<s.endIndex
+            if let end = endTokens.compactMap({ s.range(of: $0, range: searchRange) }).min(by: { $0.lowerBound < $1.lowerBound }) {
+                s.removeSubrange(start.lowerBound..<end.upperBound)
+            } else {
+                s.removeSubrange(start.lowerBound..<s.endIndex)
+                break
+            }
+        }
+
         return s
     }
 }

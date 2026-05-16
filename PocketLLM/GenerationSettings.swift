@@ -15,4 +15,11 @@ final class GenerationSettings: ObservableObject {
     @Published var seed: UInt32 = 1234
 
     @Published var miniCPMV46ImageSlices: Int32 = 9
+
+    @Published var gemmaMaxNewTokens: Int32 = 4000
+    @Published var gemmaTemperature: Float = 1.0
+    @Published var gemmaTopK: Int32 = 64
+    @Published var gemmaTopP: Float = 0.95
+    @Published var gemmaUseGPU: Bool = true
+    @Published var gemmaThinkingEnabled: Bool = false
 }

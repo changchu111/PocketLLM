@@ -15,6 +15,7 @@ struct ModelsView: View {
             }
         }
     )
+    @State private var expandedFamilyKeys: Set<String> = []
 
     private var installedModels: [ModelDescriptor] {
         modelStore.installed.filter { model in
@@ -121,78 +122,126 @@ struct ModelsView: View {
         let categoryOrganizations = organizations(in: categoryModels)
 
         return Section {
-            if categoryModels.isEmpty {
-                Text("该类别暂无模型")
-                    .foregroundStyle(.secondary)
-            } else if categoryOrganizations.count == 1, let organization = categoryOrganizations.first {
-                let organizationModels = models(for: organization, in: categoryModels)
-
-                OrganizationHeader(
-                    organization: organization,
-                    modelCount: organizationModels.count
-                )
-                .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16))
-                .listRowSeparator(.hidden)
-
-                ForEach(Array(organizationModels.enumerated()), id: \.element.id) { _, model in
-                    DownloadModelRow(
-                        model: model,
-                        pairedModel: modelStore.pairedMMProj(for: model),
-                        isInstalled: modelStore.isInstalledForDisplay(model),
-                        isPartiallyInstalled: modelStore.isPartiallyInstalled(model),
-                        downloadState: modelStore.downloadState[model.id],
-                        pairedDownloadState: pairedDownloadState(for: model),
-                        onDownload: { modelStore.download(model) },
-                        onRemovePartialDownload: {
-                            partialDownloadPendingDeletion = model
-                            showingPartialDeleteConfirmation = true
-                        }
-                    )
-                    .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
-                    .listRowSeparator(.hidden)
-                }
-            } else {
-                ForEach(Array(categoryOrganizations.enumerated()), id: \.element.id) { organizationIndex, organization in
+            VStack(alignment: .leading, spacing: 0) {
+                if categoryModels.isEmpty {
+                    Text("该类别暂无模型")
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(18)
+                } else if categoryOrganizations.count == 1, let organization = categoryOrganizations.first {
                     let organizationModels = models(for: organization, in: categoryModels)
 
-                    DisclosureGroup(
-                        isExpanded: bindingForOrganization(organization, in: selectedCategory),
-                        content: {
-                            ForEach(Array(organizationModels.enumerated()), id: \.element.id) { _, model in
-                                DownloadModelRow(
-                                    model: model,
-                                    pairedModel: modelStore.pairedMMProj(for: model),
-                                    isInstalled: modelStore.isInstalledForDisplay(model),
-                                    isPartiallyInstalled: modelStore.isPartiallyInstalled(model),
-                                    downloadState: modelStore.downloadState[model.id],
-                                    pairedDownloadState: pairedDownloadState(for: model),
-                                    onDownload: { modelStore.download(model) },
-                                    onRemovePartialDownload: {
-                                        partialDownloadPendingDeletion = model
-                                        showingPartialDeleteConfirmation = true
-                                    }
-                                )
-                                .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
-                                .listRowSeparator(.hidden)
-                            }
-                        },
-                        label: {
-                            OrganizationHeader(
-                                organization: organization,
-                                modelCount: organizationModels.count,
-                                showsTopDivider: organizationIndex > 0
-                            )
-                        }
+                    OrganizationHeader(
+                        organization: organization,
+                        modelCount: modelFamilies(in: organizationModels).count
                     )
-                    .listRowInsets(EdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 16))
-                    .listRowSeparator(.hidden)
+
+                    catalogFamilyRows(for: organizationModels, in: organization)
+                } else {
+                    ForEach(Array(categoryOrganizations.enumerated()), id: \.element.id) { organizationIndex, organization in
+                        let organizationModels = models(for: organization, in: categoryModels)
+                        let isExpanded = isOrganizationExpanded(organization, in: selectedCategory)
+
+                        if organizationIndex > 0 {
+                            CatalogDivider(horizontalInset: 24)
+                        }
+
+                        OrganizationHeader(
+                            organization: organization,
+                            modelCount: modelFamilies(in: organizationModels).count,
+                            isExpanded: isExpanded
+                        )
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            setOrganization(organization, in: selectedCategory, isExpanded: !isExpanded)
+                        }
+
+                        if isExpanded {
+                            catalogFamilyRows(for: organizationModels, in: organization)
+                        }
+                    }
                 }
             }
+            .background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
         }
     }
 
     private func models(for organization: ModelDescriptor.Organization, in models: [ModelDescriptor]) -> [ModelDescriptor] {
         models.filter { $0.metadata.organization == organization }
+    }
+
+    @ViewBuilder
+    private func catalogFamilyRows(for models: [ModelDescriptor], in organization: ModelDescriptor.Organization) -> some View {
+        ForEach(modelFamilies(in: models)) { family in
+            if family.variants.count == 1, let model = family.variants.first {
+                downloadRow(for: model)
+            } else {
+                let key = familyKey(family.id, organization: organization)
+                let isExpanded = expandedFamilyKeys.contains(key)
+
+                ModelFamilyRow(
+                    family: family,
+                    isExpanded: isExpanded
+                )
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    setFamily(key, isExpanded: !isExpanded)
+                }
+
+                if isExpanded {
+                    ForEach(family.variants) { model in
+                        downloadRow(for: model)
+                    }
+                }
+            }
+        }
+    }
+
+    private func downloadRow(for model: ModelDescriptor) -> some View {
+        DownloadModelRow(
+            model: model,
+            pairedModel: modelStore.pairedMMProj(for: model),
+            isInstalled: modelStore.isInstalledForDisplay(model),
+            isPartiallyInstalled: modelStore.isPartiallyInstalled(model),
+            downloadState: modelStore.downloadState[model.id],
+            pairedDownloadState: pairedDownloadState(for: model),
+            onDownload: { modelStore.download(model) },
+            onCancelDownload: { modelStore.cancelDownload(model) },
+            onRemovePartialDownload: {
+                partialDownloadPendingDeletion = model
+                showingPartialDeleteConfirmation = true
+            }
+        )
+    }
+
+    private func modelFamilies(in models: [ModelDescriptor]) -> [ModelFamily] {
+        var families: [ModelFamily] = []
+
+        for model in models {
+            let familyName = model.familyDisplayName
+            if let index = families.firstIndex(where: { $0.id == familyName }) {
+                families[index].variants.append(model)
+            } else {
+                families.append(ModelFamily(id: familyName, name: familyName, variants: [model]))
+            }
+        }
+
+        return families
+    }
+
+    private func familyKey(_ familyID: String, organization: ModelDescriptor.Organization) -> String {
+        "\(selectedCategory.rawValue).\(organization.rawValue).\(familyID)"
+    }
+
+    private func setFamily(_ key: String, isExpanded: Bool) {
+        if isExpanded {
+            expandedFamilyKeys.insert(key)
+        } else {
+            expandedFamilyKeys.remove(key)
+        }
     }
 
     private func organizations(in models: [ModelDescriptor]) -> [ModelDescriptor.Organization] {
@@ -219,6 +268,19 @@ struct ModelsView: View {
                 }
             }
         )
+    }
+
+    private func isOrganizationExpanded(_ organization: ModelDescriptor.Organization, in category: ModelDescriptor.Category) -> Bool {
+        expandedOrganizationKeys.contains("\(category.rawValue).\(organization.rawValue)")
+    }
+
+    private func setOrganization(_ organization: ModelDescriptor.Organization, in category: ModelDescriptor.Category, isExpanded: Bool) {
+        let key = "\(category.rawValue).\(organization.rawValue)"
+        if isExpanded {
+            expandedOrganizationKeys.insert(key)
+        } else {
+            expandedOrganizationKeys.remove(key)
+        }
     }
 
     private func pairedDownloadState(for model: ModelDescriptor) -> ModelStore.DownloadState? {
@@ -248,31 +310,81 @@ struct ModelsView: View {
     }
 }
 
+private struct ModelFamily: Identifiable {
+    let id: String
+    let name: String
+    var variants: [ModelDescriptor]
+
+    var representative: ModelDescriptor { variants[0] }
+}
+
 private struct OrganizationHeader: View {
     let organization: ModelDescriptor.Organization
     let modelCount: Int
-    var showsTopDivider = false
+    var isExpanded: Bool?
+
+    var body: some View {
+        HStack(spacing: 10) {
+            RemoteAvatar(organization: organization, size: 34)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(organization.displayName)
+                    .font(.headline)
+                Text("\(modelCount) 个模型")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if let isExpanded {
+                Image(systemName: "chevron.right")
+                    .font(.headline.weight(.semibold))
+                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    .frame(width: 32, height: 32)
+                    .animation(nil, value: isExpanded)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+    }
+}
+
+private struct ModelFamilyRow: View {
+    let family: ModelFamily
+    let isExpanded: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            if showsTopDivider {
-                Divider()
-                    .padding(.bottom, 12)
-            }
+            CatalogDivider(horizontalInset: 60)
+                .padding(.bottom, 8)
 
-            HStack(spacing: 10) {
-                RemoteAvatar(organization: organization, size: 34)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(organization.displayName)
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(family.name)
                         .font(.headline)
-                    Text("\(modelCount) 个模型")
+                    Text("\(family.variants.count) 个量化版本 · 参数 \(family.representative.metadata.parameterCount) · \(family.representative.metadata.releaseMonth) 发布")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    .frame(width: 32, height: 32)
+                    .animation(nil, value: isExpanded)
             }
+            .padding(.top, 8)
+            .padding(.bottom, 12)
+            .padding(.leading, 60)
+            .padding(.trailing, 16)
         }
-        .padding(.vertical, 4)
+    }
+}
+
+private struct CatalogDivider: View {
+    let horizontalInset: CGFloat
+
+    var body: some View {
+        Divider()
+            .padding(.horizontal, horizontalInset)
     }
 }
 
@@ -340,7 +452,7 @@ private struct InstalledModelRow: View {
         HStack(alignment: .top, spacing: 12) {
             RemoteAvatar(organization: model.metadata.organization, size: 34)
             VStack(alignment: .leading, spacing: 5) {
-                Text(model.name)
+                Text(model.name.quantizationDisplayName)
                     .font(.headline)
                 ModelMetadataLine(model: model)
             }
@@ -373,27 +485,34 @@ private struct DownloadModelRow: View {
     let pairedDownloadState: ModelStore.DownloadState?
     var showsTopDivider = true
     let onDownload: () -> Void
+    let onCancelDownload: () -> Void
     let onRemovePartialDownload: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             if showsTopDivider {
-                Divider()
-                    .padding(.bottom, 12)
+                CatalogDivider(horizontalInset: 60)
+                    .padding(.bottom, 8)
             }
 
             VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .top, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text(model.name)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline, spacing: 12) {
+                        Text(model.name.quantizationDisplayName)
                             .font(.headline)
-                        ModelMetadataLine(model: model)
+                            .layoutPriority(1)
+                            .lineLimit(1)
+                            .allowsTightening(true)
+                        Spacer()
+                        actionButton
+                            .fixedSize(horizontal: true, vertical: false)
                     }
-                    Spacer()
-                    actionButton
-                }
 
-                if isDownloading(downloadState) || isDownloading(pairedDownloadState) {
+                    ModelMetadataLine(model: model)
+                }
+                .layoutPriority(1)
+
+                if isRowDownloading {
                     DownloadPartRow(
                         title: mainPartTitle,
                         state: downloadState
@@ -407,28 +526,37 @@ private struct DownloadModelRow: View {
                     }
                 }
             }
-            .padding(.vertical, 10)
+            .padding(.top, 8)
+            .padding(.bottom, 16)
+            .padding(.leading, 60)
+            .padding(.trailing, 16)
         }
     }
 
     @ViewBuilder
     private var actionButton: some View {
         if isInstalled {
-            Label("已下载", systemImage: "checkmark.circle.fill")
+            HStack(spacing: 4) {
+                Image(systemName: "checkmark.circle.fill")
+                Text("已下载")
+            }
                 .font(.caption)
                 .foregroundStyle(.green)
-        } else if isDownloading(downloadState) || isDownloading(pairedDownloadState) {
-            Text("下载中")
+        } else if isRowDownloading {
+            Button("取消", role: .destructive, action: onCancelDownload)
                 .font(.caption)
-                .foregroundStyle(.secondary)
-        } else if hasFailed(downloadState) || hasFailed(pairedDownloadState) {
+                .buttonStyle(.borderless)
+        } else if hasRowFailed {
             Button("重试", action: onDownload)
+                .buttonStyle(.borderless)
         } else {
             VStack(alignment: .trailing, spacing: 6) {
                 Button(isPartiallyInstalled ? "继续" : "下载", action: onDownload)
+                    .buttonStyle(.borderless)
                 if isPartiallyInstalled {
                     Button("移除", role: .destructive, action: onRemovePartialDownload)
                         .font(.caption)
+                        .buttonStyle(.borderless)
                 }
             }
         }
@@ -436,6 +564,18 @@ private struct DownloadModelRow: View {
 
     private var mainPartTitle: String {
         model.kind == .privacyFilter ? "隐私过滤文件" : "模型文件"
+    }
+
+    private var isRowDownloading: Bool {
+        isDownloading(downloadState) || (isDownloaded(downloadState) && isDownloading(pairedDownloadState))
+    }
+
+    private var hasRowFailed: Bool {
+        hasFailed(downloadState) || (isDownloaded(downloadState) && hasFailed(pairedDownloadState))
+    }
+
+    private func isDownloaded(_ state: ModelStore.DownloadState?) -> Bool {
+        state?.status == .downloaded
     }
 
     private func isDownloading(_ state: ModelStore.DownloadState?) -> Bool {
@@ -454,13 +594,25 @@ private struct DownloadModelRow: View {
 
 }
 
+private extension ModelDescriptor {
+    var familyDisplayName: String {
+        name.replacingOccurrences(
+            of: #"\s*\((Q\d(?:_[A-Z0-9]+)*|F16)\)$"#,
+            with: "",
+            options: .regularExpression
+        )
+    }
+}
+
 private struct ModelMetadataLine: View {
     let model: ModelDescriptor
 
     var body: some View {
-        Text("大小 \(normalizedSize) · 参数 \(model.metadata.parameterCount) · 发布时间 \(model.metadata.releaseMonth)")
+        Text("大小 \(normalizedSize) · 参数 \(model.metadata.parameterCount) · \(model.metadata.releaseMonth) 发布")
             .font(.caption)
             .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .allowsTightening(true)
     }
 
     private var normalizedSize: String {

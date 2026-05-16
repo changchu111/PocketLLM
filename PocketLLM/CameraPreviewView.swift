@@ -6,10 +6,12 @@ struct CameraPreviewView: UIViewControllerRepresentable {
     let captureNonce: Int
     let isPaused: Bool
     let onImage: (UIImage) -> Void
+    let onReady: () -> Void
 
     func makeUIViewController(context: Context) -> CameraViewController {
         let vc = CameraViewController()
         vc.onImage = onImage
+        vc.onReady = onReady
         return vc
     }
 
@@ -33,6 +35,7 @@ struct CameraPreviewView: UIViewControllerRepresentable {
 
 final class CameraViewController: UIViewController {
     var onImage: ((UIImage) -> Void)?
+    var onReady: (() -> Void)?
 
     private let session = AVCaptureSession()
     private let photoOutput = AVCapturePhotoOutput()
@@ -49,6 +52,7 @@ final class CameraViewController: UIViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
+        setupPreviewLayer()
     }
 
     override func viewDidAppear(_ animated: Bool) {
@@ -190,23 +194,28 @@ final class CameraViewController: UIViewController {
         }
         session.addOutput(photoOutput)
 
-        DispatchQueue.main.async {
-            let layer = AVCaptureVideoPreviewLayer(session: self.session)
-            layer.videoGravity = .resizeAspectFill
-            layer.frame = self.view.bounds
-            self.view.layer.insertSublayer(layer, at: 0)
-            self.previewLayer = layer
-        }
-
         isConfigured = true
+    }
+
+    private func setupPreviewLayer() {
+        guard previewLayer == nil else { return }
+        let layer = AVCaptureVideoPreviewLayer(session: session)
+        layer.videoGravity = .resizeAspectFill
+        layer.frame = view.bounds
+        view.layer.insertSublayer(layer, at: 0)
+        previewLayer = layer
     }
 
     private func startRunningIfPossible() {
         guard isConfigured else { return }
         guard !isConfiguringSession else { return }
         guard !isPaused else { return }
-        guard !session.isRunning else { return }
+        guard !session.isRunning else {
+            DispatchQueue.main.async { self.onReady?() }
+            return
+        }
         session.startRunning()
+        DispatchQueue.main.async { self.onReady?() }
     }
 
     private func makeVideoInput(position: AVCaptureDevice.Position) -> AVCaptureDeviceInput? {

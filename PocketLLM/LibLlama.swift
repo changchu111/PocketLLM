@@ -8,6 +8,7 @@ import UIKit
 
 enum LlamaError: Error {
     case couldNotInitializeContext
+    case modelLoadFailed
     case decodeFailed(Int32)
     case promptTooLong(promptTokens: Int32, contextLength: Int32)
     case visionNotAvailable
@@ -22,6 +23,8 @@ extension LlamaError: LocalizedError {
         switch self {
         case .couldNotInitializeContext:
             return "Failed to initialize llama context."
+        case .modelLoadFailed:
+            return "模型加载失败。请稍等片刻后重试，或先清空上下文再加载。"
         case .decodeFailed(let code):
             return "llama_decode failed (code: \(code))."
         case .promptTooLong(let promptTokens, let contextLength):
@@ -37,6 +40,16 @@ extension LlamaError: LocalizedError {
         case .mtmdEvalFailed(let code):
             return "Failed to evaluate multimodal prompt (code: \(code))."
         }
+    }
+}
+
+private enum LlamaBackend {
+    nonisolated(unsafe) private static let initialized: Void = {
+        llama_backend_init()
+    }()
+
+    nonisolated static func ensureInitialized() {
+        _ = initialized
     }
 }
 
@@ -61,6 +74,7 @@ actor LlamaContext {
     private var maxNewTokensRemaining: Int32 = 0
 
     private var shouldStop: Bool = false
+    private var isClosed = false
 
     private func batchClear() {
         batch.n_tokens = 0
@@ -102,30 +116,59 @@ actor LlamaContext {
     }
 
     deinit {
+        closeResources()
+    }
+
+    private func closeResources() {
+        guard isClosed == false else { return }
+        isClosed = true
         llama_sampler_free(sampling)
         llama_batch_free(batch)
         if let mtmd {
             mtmd_free(mtmd)
+            self.mtmd = nil
         }
-        llama_model_free(model)
         llama_free(context)
-        llama_backend_free()
+        llama_model_free(model)
     }
 
-    static func create_context(path: String, contextLength: Int32, temperature: Float, topK: Int32, topP: Float, presencePenalty: Float, frequencyPenalty: Float, mmprojPath: String?, seed: UInt32, imageMaxSlices: Int32) throws -> LlamaContext {
-        llama_backend_init()
+    func close() {
+        closeResources()
+    }
+
+    static func create_context(path: String, contextLength: Int32, temperature: Float, topK: Int32, topP: Float, presencePenalty: Float, frequencyPenalty: Float, mmprojPath: String?, seed: UInt32, imageMaxSlices: Int32, useGPU: Bool) throws -> LlamaContext {
+        LlamaBackend.ensureInitialized()
         var model_params = llama_model_default_params()
 
 #if targetEnvironment(simulator)
         model_params.n_gpu_layers = 0
         print("Running on simulator, force use n_gpu_layers = 0")
 #else
-        model_params.n_gpu_layers = 999
+        model_params.n_gpu_layers = useGPU ? 999 : 0
 #endif
-        let model = llama_model_load_from_file(path, model_params)
+        model_params.use_mmap = true
+        let model: OpaquePointer? = llama_model_load_from_file(path, model_params)
+        var context: OpaquePointer?
+        var mtmdCtx: OpaquePointer?
+        var ownershipTransferred = false
+
+        defer {
+            if ownershipTransferred == false {
+                if let mtmdCtx {
+                    mtmd_free(mtmdCtx)
+                }
+                if let context {
+                    llama_free(context)
+                }
+                if let model {
+                    llama_model_free(model)
+                }
+            }
+        }
+
         guard let model else {
             print("Could not load model at \(path)")
-            throw LlamaError.couldNotInitializeContext
+            throw LlamaError.modelLoadFailed
         }
 
         let n_threads = max(1, min(8, ProcessInfo.processInfo.processorCount - 2))
@@ -147,17 +190,16 @@ actor LlamaContext {
         ctx_params.n_threads       = Int32(n_threads)
         ctx_params.n_threads_batch = Int32(n_threads)
 
-        let context = llama_init_from_model(model, ctx_params)
+        context = llama_init_from_model(model, ctx_params)
         guard let context else {
             print("Could not load context!")
             throw LlamaError.couldNotInitializeContext
         }
 
-        var mtmdCtx: OpaquePointer?
         if let mmprojPath {
             var mparams = mtmd_context_params_default()
             let modelFilename = URL(fileURLWithPath: path).lastPathComponent.lowercased()
-            let useCPUForMMProj = modelFilename.contains("minicpm-v-4_5")
+            let useCPUForMMProj = !useGPU || modelFilename.contains("minicpm-v-4_5")
 
             // MiniCPM-V 4.5 projector is too large for stable Metal allocation on iPhone.
             // MiniCPM-V 4.6 is designed for mobile and is much faster with the projector on GPU.
@@ -175,7 +217,7 @@ actor LlamaContext {
             }
         }
 
-        return LlamaContext(
+        let result = LlamaContext(
             model: model,
             context: context,
             mtmd: mtmdCtx,
@@ -187,6 +229,8 @@ actor LlamaContext {
             frequencyPenalty: frequencyPenalty,
             seed: seed
         )
+        ownershipTransferred = true
+        return result
     }
 
     private func ensurePromptBatchCapacity(promptTokens: Int32) {
@@ -248,10 +292,12 @@ actor LlamaContext {
     }
 
     func requestStop() {
+        guard isClosed == false else { return }
         shouldStop = true
     }
 
     func completion_init(text: String, imageURL: URL?, maxNewTokens: Int32) throws {
+        guard isClosed == false else { throw CancellationError() }
         shouldStop = false
         is_done = false
         n_decode = 0
@@ -313,6 +359,7 @@ actor LlamaContext {
     }
 
     private func completion_init_mtmd(text: String, imageURL: URL) throws {
+        guard isClosed == false else { throw CancellationError() }
         guard let mtmd else {
             throw LlamaError.visionNotAvailable
         }
@@ -377,6 +424,7 @@ actor LlamaContext {
     }
 
     func completion_loop() throws -> String {
+        guard isClosed == false else { throw CancellationError() }
         if shouldStop {
             is_done = true
             return ""
@@ -430,6 +478,7 @@ actor LlamaContext {
     }
 
     func clear() {
+        guard isClosed == false else { return }
         tokens_list.removeAll()
         temporary_invalid_cchars.removeAll()
         llama_memory_clear(llama_get_memory(context), true)

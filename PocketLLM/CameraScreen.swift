@@ -7,16 +7,33 @@ struct CameraScreen: View {
     @State private var showingPicker = false
     @State private var useFrontCamera = false
     @State private var captureNonce: Int = 0
+    @State private var isCameraReady = false
 
     var body: some View {
         ZStack {
+            Color.black
+                .ignoresSafeArea()
+
             CameraPreviewView(
                 useFrontCamera: useFrontCamera,
                 captureNonce: captureNonce,
                 isPaused: showingPicker,
-                onImage: onImage
+                onImage: onImage,
+                onReady: {
+                    withAnimation(.easeOut(duration: 0.12)) {
+                        isCameraReady = true
+                    }
+                }
             )
             .ignoresSafeArea()
+            .opacity(isCameraReady ? 1 : 0)
+
+            if !isCameraReady {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .tint(.white)
+                    .scaleEffect(1.2)
+            }
 
             VStack {
                 HStack {
@@ -67,6 +84,10 @@ struct CameraScreen: View {
                 .padding(.horizontal, 22)
                 .padding(.bottom, 26)
             }
+            .opacity(isCameraReady ? 1 : 0)
+        }
+        .onAppear {
+            isCameraReady = false
         }
         .sheet(isPresented: $showingPicker) {
             PhotoPicker { image in
