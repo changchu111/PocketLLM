@@ -72,6 +72,7 @@ actor LlamaContext {
     var n_decode: Int32 = 0
 
     private var maxNewTokensRemaining: Int32 = 0
+    private let imageEvalBatchCap: Int32
 
     private var shouldStop: Bool = false
     private var isClosed = false
@@ -95,13 +96,14 @@ actor LlamaContext {
         batch.n_tokens += 1
     }
 
-    init(model: OpaquePointer, context: OpaquePointer, mtmd: OpaquePointer?, contextLength: Int32, temperature: Float, topK: Int32, topP: Float, presencePenalty: Float, frequencyPenalty: Float, seed: UInt32) {
+    init(model: OpaquePointer, context: OpaquePointer, mtmd: OpaquePointer?, contextLength: Int32, temperature: Float, topK: Int32, topP: Float, repeatPenalty: Float, presencePenalty: Float, frequencyPenalty: Float, seed: UInt32, imageEvalBatchCap: Int32) {
         self.model = model
         self.context = context
         self.mtmd = mtmd
         self.tokens_list = []
         self.batchCapacity = max(512, contextLength)
         self.batch = llama_batch_init(self.batchCapacity, 0, 1)
+        self.imageEvalBatchCap = max(1, imageEvalBatchCap)
         self.temporary_invalid_cchars = []
         self.vocab = llama_model_get_vocab(model)
 
@@ -109,6 +111,7 @@ actor LlamaContext {
             temperature: temperature,
             topK: topK,
             topP: topP,
+            repeatPenalty: repeatPenalty,
             presencePenalty: presencePenalty,
             frequencyPenalty: frequencyPenalty,
             seed: seed
@@ -136,7 +139,7 @@ actor LlamaContext {
         closeResources()
     }
 
-    static func create_context(path: String, contextLength: Int32, temperature: Float, topK: Int32, topP: Float, presencePenalty: Float, frequencyPenalty: Float, mmprojPath: String?, seed: UInt32, imageMaxSlices: Int32, useGPU: Bool) throws -> LlamaContext {
+    static func create_context(path: String, contextLength: Int32, temperature: Float, topK: Int32, topP: Float, repeatPenalty: Float, presencePenalty: Float, frequencyPenalty: Float, mmprojPath: String?, seed: UInt32, imageMaxSlices: Int32, useGPU: Bool, batchSize: Int32, ubatchSize: Int32, imageEvalBatchSize: Int32, forceMMProjCPU: Bool) throws -> LlamaContext {
         LlamaBackend.ensureInitialized()
         var model_params = llama_model_default_params()
 
@@ -176,19 +179,13 @@ actor LlamaContext {
 
         var ctx_params = llama_context_default_params()
         ctx_params.n_ctx = UInt32(max(256, contextLength))
-        // For mtmd/Qwen image decode, splitting one image across multiple ubatches can cause
-        // non-consecutive position errors. Use a larger ubatch for multimodal contexts so a
-        // typical 384px image stays within a single image batch.
-        let multimodalBatchCap: Int32
-        if mmprojPath != nil {
-            multimodalBatchCap = 1024
-        } else {
-            multimodalBatchCap = 768
-        }
-        ctx_params.n_batch = UInt32(multimodalBatchCap)
-        ctx_params.n_ubatch = UInt32(multimodalBatchCap)
+        let safeBatchSize = UInt32(max(256, min(1024, batchSize)))
+        let safeUbatchSize = UInt32(max(256, min(Int32(safeBatchSize), ubatchSize)))
+        ctx_params.n_batch = safeBatchSize
+        ctx_params.n_ubatch = safeUbatchSize
         ctx_params.n_threads       = Int32(n_threads)
         ctx_params.n_threads_batch = Int32(n_threads)
+        print("llama context params: n_ctx=\(ctx_params.n_ctx), n_batch=\(ctx_params.n_batch), n_ubatch=\(ctx_params.n_ubatch), useGPU=\(useGPU)")
 
         context = llama_init_from_model(model, ctx_params)
         guard let context else {
@@ -199,7 +196,7 @@ actor LlamaContext {
         if let mmprojPath {
             var mparams = mtmd_context_params_default()
             let modelFilename = URL(fileURLWithPath: path).lastPathComponent.lowercased()
-            let useCPUForMMProj = !useGPU || modelFilename.contains("minicpm-v-4_5")
+            let useCPUForMMProj = forceMMProjCPU || !useGPU || modelFilename.contains("minicpm-v-4_5")
 
             // MiniCPM-V 4.5 projector is too large for stable Metal allocation on iPhone.
             // MiniCPM-V 4.6 is designed for mobile and is much faster with the projector on GPU.
@@ -207,6 +204,7 @@ actor LlamaContext {
             mparams.print_timings = false
             mparams.n_threads = Int32(n_threads)
             mparams.image_max_slices = max(1, min(9, imageMaxSlices))
+            print("mtmd params: image_max_slices=\(mparams.image_max_slices), mmprojGPU=\(mparams.use_gpu), mmproj=\(URL(fileURLWithPath: mmprojPath).lastPathComponent)")
             mtmdCtx = mtmd_init_from_file(mmprojPath, model, mparams)
             if mtmdCtx == nil, !useCPUForMMProj {
                 mparams.use_gpu = false
@@ -225,9 +223,11 @@ actor LlamaContext {
             temperature: temperature,
             topK: topK,
             topP: topP,
+            repeatPenalty: repeatPenalty,
             presencePenalty: presencePenalty,
             frequencyPenalty: frequencyPenalty,
-            seed: seed
+            seed: seed,
+            imageEvalBatchCap: imageEvalBatchSize
         )
         ownershipTransferred = true
         return result
@@ -243,11 +243,12 @@ actor LlamaContext {
         batch = llama_batch_init(batchCapacity, 0, 1)
     }
 
-    func updateSampling(temperature: Float, topK: Int32, topP: Float, presencePenalty: Float, frequencyPenalty: Float, seed: UInt32) {
+    func updateSampling(temperature: Float, topK: Int32, topP: Float, repeatPenalty: Float, presencePenalty: Float, frequencyPenalty: Float, seed: UInt32) {
         let next = Self.makeSampler(
             temperature: temperature,
             topK: topK,
             topP: topP,
+            repeatPenalty: repeatPenalty,
             presencePenalty: presencePenalty,
             frequencyPenalty: frequencyPenalty,
             seed: seed
@@ -260,6 +261,7 @@ actor LlamaContext {
         temperature: Float,
         topK: Int32,
         topP: Float,
+        repeatPenalty: Float,
         presencePenalty: Float,
         frequencyPenalty: Float,
         seed: UInt32
@@ -269,11 +271,10 @@ actor LlamaContext {
             fatalError("Failed to init llama sampler chain")
         }
 
-        // Penalties (OpenAI-like) - repeat penalty disabled (1.0)
-        if presencePenalty > 0 || frequencyPenalty > 0 {
+        if repeatPenalty != 1.0 || presencePenalty > 0 || frequencyPenalty > 0 {
             llama_sampler_chain_add(chain, llama_sampler_init_penalties(
                 /* penalty_last_n */ 64,
-                /* penalty_repeat */ 1.0,
+                /* penalty_repeat */ repeatPenalty,
                 /* penalty_freq   */ frequencyPenalty,
                 /* penalty_present*/ presencePenalty
             ))
@@ -391,13 +392,15 @@ actor LlamaContext {
         }
 
         var newNPast: llama_pos = 0
+        let imageEvalBatch = min(Int32(llama_n_batch(context)), imageEvalBatchCap)
+        print("mtmd eval chunks: n_batch=\(llama_n_batch(context)), imageEvalBatch=\(imageEvalBatch), image=\(imageURL.lastPathComponent)")
         let resEval = mtmd_helper_eval_chunks(
             mtmd,
             context,
             chunks,
             0,
             0,
-            Int32(llama_n_batch(context)),
+            imageEvalBatch,
             true,
             &newNPast
         )

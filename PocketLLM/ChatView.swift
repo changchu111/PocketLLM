@@ -149,7 +149,7 @@ private struct ChatSurface: View {
             viewModel.prepareForChat()
         }
         .onDisappear {
-            viewModel.leaveChat()
+            viewModel.leaveChat(clearSession: showingCamera == false)
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -226,149 +226,179 @@ private struct ModelSettingsSheet: View {
     @ObservedObject var viewModel: ChatViewModel
     let onDismiss: () -> Void
 
+    @State private var maxTokens: Double
+    @State private var contextLength: Double
+    @State private var topK: Double
+    @State private var topP: Double
+    @State private var temperature: Double
+    @State private var repeatPenalty: Double
+    @State private var presencePenalty: Double
+    @State private var frequencyPenalty: Double
+    @State private var imageSlices: Double
+    @State private var useGPU: Bool
+    @State private var thinkingEnabled: Bool
+
+    init(viewModel: ChatViewModel, onDismiss: @escaping () -> Void) {
+        self.viewModel = viewModel
+        self.onDismiss = onDismiss
+        _maxTokens = State(initialValue: Double(viewModel.activeModelIsGemma4 ? viewModel.gemmaMaxNewTokens : viewModel.maxNewTokens))
+        _contextLength = State(initialValue: Double(viewModel.contextLength))
+        _topK = State(initialValue: Double(viewModel.activeModelIsGemma4 ? viewModel.gemmaTopK : viewModel.topK))
+        _topP = State(initialValue: Double(viewModel.activeModelIsGemma4 ? viewModel.gemmaTopP : viewModel.topP))
+        _temperature = State(initialValue: Double(viewModel.activeModelIsGemma4 ? viewModel.gemmaTemperature : viewModel.temperature))
+        _repeatPenalty = State(initialValue: Double(viewModel.repeatPenalty))
+        _presencePenalty = State(initialValue: Double(viewModel.presencePenalty))
+        _frequencyPenalty = State(initialValue: Double(viewModel.frequencyPenalty))
+        _imageSlices = State(initialValue: Double(viewModel.miniCPMV46ImageSlices))
+        _useGPU = State(initialValue: viewModel.gemmaUseGPU)
+        _thinkingEnabled = State(initialValue: viewModel.gemmaThinkingEnabled)
+    }
+
     var body: some View {
-        if viewModel.activeModelIsGemma4 {
-            GoogleGemmaConfigurationsView(viewModel: viewModel, onDismiss: onDismiss)
-        } else {
-            NavigationStack {
-            Form {
-                Section("当前模型") {
-                    Text(viewModel.activeModelName)
+        VStack(alignment: .leading, spacing: 12) {
+            Text("模型配置")
+                .font(.title2.weight(.semibold))
+
+            Text(viewModel.activeModelName)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+
+            ConfigSliderRow(title: "最大 Token 数", value: $maxTokens, range: viewModel.activeModelIsGemma4 ? 16...32000 : 16...4096, integerOnly: true)
+
+            if viewModel.activeModelIsMiniCPMV46 {
+                ConfigSliderRow(title: "图片切片数", value: $imageSlices, range: 1...9, integerOnly: true)
+                ConfigInfoText("MiniCPM-V 4.6 使用推荐采样：Temperature 0.7、TopP 0.8、TopK 100、Repeat Penalty 1.05。切片越多越利于识别细节，但会增加耗时。")
+            } else if viewModel.activeModelIsGemma4 {
+                ConfigSliderRow(title: "TopK", value: $topK, range: 0...64, integerOnly: true)
+                ConfigSliderRow(title: "TopP", value: $topP, range: 0...1, integerOnly: false)
+                ConfigSliderRow(title: "Temperature", value: $temperature, range: 0...2, integerOnly: false)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("选择加速方式")
+                        .font(.caption.weight(.semibold))
+
+                    HStack(spacing: 6) {
+                        AcceleratorSegmentButton(title: "CPU", isSelected: useGPU == false) { setUseGPU(false) }
+                        AcceleratorSegmentButton(title: "GPU", isSelected: useGPU) { setUseGPU(true) }
+                    }
+                    .padding(3)
+                    .background(Color(uiColor: .tertiarySystemFill), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
 
-                Section("生成") {
-                    IntStepperRow(
-                        title: "最大输出 Token",
-                        value: Binding(get: {
-                            Int(viewModel.maxNewTokens)
-                        }, set: { newValue in
-                            viewModel.maxNewTokens = Int32(newValue)
-                        }),
-                        range: 16...4096,
-                        step: 16
-                    )
+                Toggle("启用思考", isOn: $thinkingEnabled)
+                    .font(.subheadline.weight(.semibold))
+                    .tint(.accentColor)
+            } else {
+                ConfigSliderRow(title: "上下文长度", value: $contextLength, range: 512...16384, integerOnly: true)
+                ConfigSliderRow(title: "TopK", value: $topK, range: 0...200, integerOnly: true)
+                ConfigSliderRow(title: "TopP", value: $topP, range: 0...1, integerOnly: false)
+                ConfigSliderRow(title: "Temperature", value: $temperature, range: 0...1.5, integerOnly: false)
+                ConfigSliderRow(title: "Repeat Penalty", value: $repeatPenalty, range: 0.8...2, integerOnly: false)
 
-                    FloatSliderRow(
-                        title: "温度",
-                        value: Binding(get: {
-                            Double(viewModel.temperature)
-                        }, set: { newValue in
-                            viewModel.temperature = Float(newValue)
-                        }),
-                        range: 0.0...1.5
-                    )
-
-                    if viewModel.activeModelIsMiniCPMV46 == false {
-                        IntStepperRow(
-                            title: "Top-k",
-                            value: Binding(get: {
-                                Int(viewModel.topK)
-                            }, set: { newValue in
-                                viewModel.topK = Int32(newValue)
-                            }),
-                            range: 0...200,
-                            step: 1
-                        )
-
-                        FloatSliderRow(
-                            title: "Top-p",
-                            value: Binding(get: {
-                                Double(viewModel.topP)
-                            }, set: { newValue in
-                                viewModel.topP = Float(newValue)
-                            }),
-                            range: 0.0...1.0
-                        )
-
-                        FloatSliderRow(
-                            title: "存在惩罚",
-                            value: Binding(get: {
-                                Double(viewModel.presencePenalty)
-                            }, set: { newValue in
-                                viewModel.presencePenalty = Float(newValue)
-                            }),
-                            range: 0.0...2.0
-                        )
-
-                        FloatSliderRow(
-                            title: "频率惩罚",
-                            value: Binding(get: {
-                                Double(viewModel.frequencyPenalty)
-                            }, set: { newValue in
-                                viewModel.frequencyPenalty = Float(newValue)
-                            }),
-                            range: 0.0...2.0
-                        )
-                    } else {
-                        Text("MiniCPM-V 4.6 使用官方推荐采样策略，Top-k、Top-p 和惩罚项由运行时固定。")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    HStack {
-                        Text("随机种子")
-                        Spacer()
-                        Text("\(viewModel.seed)")
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                    }
-                    Button("随机生成种子") {
-                        viewModel.randomizeSeed()
-                    }
-                }
-
-                Section("上下文") {
-                    IntStepperRow(
-                        title: "上下文长度",
-                        value: Binding(get: {
-                            Int(viewModel.contextLength)
-                        }, set: { newValue in
-                            viewModel.contextLength = Int32(newValue)
-                        }),
-                        range: 512...16384,
-                        step: 512
-                    )
-                    Text("上下文越长，内存占用越高。")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-
-                if viewModel.activeModelIsMiniCPMV46 {
-                    Section("MiniCPM-V 4.6 专属") {
-                        IntStepperRow(
-                            title: "图片切片数",
-                            value: Binding(get: {
-                                Int(viewModel.miniCPMV46ImageSlices)
-                            }, set: { newValue in
-                                viewModel.miniCPMV46ImageSlices = Int32(newValue)
-                            }),
-                            range: 1...9,
-                            step: 1
-                        )
-                        Text("切片越多越利于识别细节，但会增加图片编码和推理耗时。")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
+                if viewModel.activeModelIsVLM {
+                    ConfigInfoText("当前 VLM 的视觉分辨率、图片批处理等参数由运行时按模型自动选择。")
                 } else {
-                    Section("模型专属") {
-                        Text(viewModel.activeModelIsVLM ? "当前 VLM 暂无额外可调图像参数；视觉组件由模型文件自动决定。" : "当前模型没有额外专属配置项。")
-                            .foregroundStyle(.secondary)
-                    }
+                    ConfigSliderRow(title: "Presence Penalty", value: $presencePenalty, range: 0...2, integerOnly: false)
+                    ConfigSliderRow(title: "Frequency Penalty", value: $frequencyPenalty, range: 0...2, integerOnly: false)
                 }
             }
-            .navigationTitle("模型设置")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("完成") {
-                        onDismiss()
-                    }
+
+            HStack {
+                Text("随机种子")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Text("\(viewModel.seed)")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Button("随机") {
+                    viewModel.randomizeSeed()
                 }
+                .font(.caption.weight(.semibold))
             }
+
+            HStack(spacing: 14) {
+                Spacer()
+                Button("取消") {
+                    withAnimation(.easeOut(duration: 0.16)) { onDismiss() }
+                }
+                .font(.callout.weight(.medium))
+                .buttonStyle(.plain)
+                .foregroundStyle(Color.accentColor)
+
+                Button {
+                    applySettings()
+                    withAnimation(.easeOut(duration: 0.16)) { onDismiss() }
+                } label: {
+                    Text("确定")
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .frame(width: 76, height: 40)
+                        .background(Color.accentColor, in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.top, 10)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .padding(.horizontal, 18)
+        .padding(.top, 22)
+        .padding(.bottom, 20)
+        .frame(maxWidth: 320)
+        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .padding(.horizontal, 24)
+    }
+
+    private func setUseGPU(_ enabled: Bool) {
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { useGPU = enabled }
+    }
+
+    private func applySettings() {
+        if viewModel.activeModelIsGemma4 {
+            viewModel.applyGemmaSettings(
+                maxNewTokens: Int32(Self.clamp(maxTokens, in: 16...32000).rounded()),
+                temperature: Float(Self.clamp(temperature, in: 0...2)),
+                topK: Int32(Self.clamp(topK, in: 0...64).rounded()),
+                topP: Float(Self.clamp(topP, in: 0...1)),
+                useGPU: useGPU,
+                thinkingEnabled: thinkingEnabled
+            )
+            return
         }
+
+        viewModel.maxNewTokens = Int32(Self.clamp(maxTokens, in: 16...4096).rounded())
+        if viewModel.activeModelIsMiniCPMV46 {
+            viewModel.miniCPMV46ImageSlices = Int32(Self.clamp(imageSlices, in: 1...9).rounded())
+            return
+        }
+
+        viewModel.contextLength = Int32(Self.clamp(contextLength, in: 512...16384).rounded())
+        viewModel.temperature = Float(Self.clamp(temperature, in: 0...1.5))
+        viewModel.topK = Int32(Self.clamp(topK, in: 0...200).rounded())
+        viewModel.topP = Float(Self.clamp(topP, in: 0...1))
+        viewModel.repeatPenalty = Float(Self.clamp(repeatPenalty, in: 0.8...2))
+        viewModel.presencePenalty = Float(Self.clamp(presencePenalty, in: 0...2))
+        viewModel.frequencyPenalty = Float(Self.clamp(frequencyPenalty, in: 0...2))
+    }
+
+    private static func clamp(_ value: Double, in range: ClosedRange<Double>) -> Double {
+        min(max(value, range.lowerBound), range.upperBound)
+    }
+}
+
+private struct ConfigInfoText: View {
+    let text: String
+
+    init(_ text: String) {
+        self.text = text
+    }
+
+    var body: some View {
+        Text(text)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }
 

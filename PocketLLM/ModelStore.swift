@@ -21,6 +21,7 @@ struct ModelDescriptor: Identifiable, Equatable {
         case google
         case openBMB
         case openAI
+        case liquidAI
         case custom
 
         var id: String { rawValue }
@@ -29,6 +30,7 @@ struct ModelDescriptor: Identifiable, Equatable {
             switch self {
             case .qwen: return "Qwen"
             case .google: return "Google"
+            case .liquidAI: return "Liquid AI"
             case .openBMB: return "OpenBMB"
             case .openAI: return "OpenAI"
             case .custom: return "Custom"
@@ -39,6 +41,7 @@ struct ModelDescriptor: Identifiable, Equatable {
             switch self {
             case .qwen: return "QwenLogo"
             case .google: return "GoogleLogo"
+            case .liquidAI: return "LiquidAILogo"
             case .openBMB: return "OpenBMBLogo"
             case .openAI: return "OpenAILogo"
             case .custom: return nil
@@ -49,6 +52,7 @@ struct ModelDescriptor: Identifiable, Equatable {
             switch self {
             case .qwen: return "sparkles"
             case .google: return "g.circle"
+            case .liquidAI: return "drop.circle"
             case .openBMB: return "cube.transparent"
             case .openAI: return "swirl.circle.righthalf.filled"
             case .custom: return "folder"
@@ -599,6 +603,46 @@ final class ModelStore: ObservableObject {
             releaseMonth: "2026-04",
             description: "Unsloth GGUF conversion of Google Gemma 4 E4B Instruct VLM"
         )
+        let lfm25_350MMetadata = ModelDescriptor.Metadata(
+            category: .llm,
+            organization: .liquidAI,
+            parameterCount: "350M",
+            modelSize: "约 267 MB",
+            releaseMonth: "2026-03",
+            description: "Liquid AI LFM 2.5 compact GGUF text model"
+        )
+        let lfm25_12BMetadata = ModelDescriptor.Metadata(
+            category: .llm,
+            organization: .liquidAI,
+            parameterCount: "1.2B",
+            modelSize: "约 731 MB",
+            releaseMonth: "2026-01",
+            description: "Liquid AI LFM 2.5 Instruct GGUF text model"
+        )
+        let lfm25_12BThinkingMetadata = ModelDescriptor.Metadata(
+            category: .llm,
+            organization: .liquidAI,
+            parameterCount: "1.2B",
+            modelSize: "约 731 MB",
+            releaseMonth: "2026-01",
+            description: "Liquid AI LFM 2.5 on-device reasoning GGUF text model"
+        )
+        let lfm25VL450MMetadata = ModelDescriptor.Metadata(
+            category: .vlm,
+            organization: .liquidAI,
+            parameterCount: "450M",
+            modelSize: "约 219 MB",
+            releaseMonth: "2026-04",
+            description: "Liquid AI LFM 2.5 VL GGUF vision-language model"
+        )
+        let lfm25VL16BMetadata = ModelDescriptor.Metadata(
+            category: .vlm,
+            organization: .liquidAI,
+            parameterCount: "1.6B",
+            modelSize: "约 696 MB",
+            releaseMonth: "2026-01",
+            description: "Liquid AI LFM 2.5 VL GGUF vision-language model"
+        )
         let miniCPMV46Q4Metadata = ModelDescriptor.Metadata(
             category: .vlm,
             organization: .openBMB,
@@ -711,6 +755,66 @@ final class ModelStore: ObservableObject {
             metadata: gemma4E4BMetadata
         )
 
+        let lfm25_350M = ModelDescriptor(
+            id: "LFM2.5-350M-Q4_K_M.gguf",
+            name: "LFM2.5-350M (Q4_K_M)",
+            filename: "LFM2.5-350M-Q4_K_M.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/LiquidAI/LFM2.5-350M-GGUF/resolve/main/LFM2.5-350M-Q4_K_M.gguf")!),
+            metadata: lfm25_350MMetadata
+        )
+
+        let lfm25_12B = ModelDescriptor(
+            id: "LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
+            name: "LFM2.5-1.2B-Instruct (Q4_K_M)",
+            filename: "LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/LiquidAI/LFM2.5-1.2B-Instruct-GGUF/resolve/main/LFM2.5-1.2B-Instruct-Q4_K_M.gguf")!),
+            metadata: lfm25_12BMetadata
+        )
+
+        let lfm25_12BThinking = ModelDescriptor(
+            id: "LFM2.5-1.2B-Thinking-Q4_K_M.gguf",
+            name: "LFM2.5-1.2B-Thinking (Q4_K_M)",
+            filename: "LFM2.5-1.2B-Thinking-Q4_K_M.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/LiquidAI/LFM2.5-1.2B-Thinking-GGUF/resolve/main/LFM2.5-1.2B-Thinking-Q4_K_M.gguf")!),
+            metadata: lfm25_12BThinkingMetadata
+        )
+
+        let lfm25VL450M = ModelDescriptor(
+            id: "LFM2.5-VL-450M-Q4_0.gguf",
+            name: "LFM2.5‑VL-450M (Q4_0)",
+            filename: "LFM2.5-VL-450M-Q4_0.gguf",
+            pairedMMProjID: "mmproj-LFM2.5-VL-450m-Q8_0.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/LiquidAI/LFM2.5-VL-450M-GGUF/resolve/main/LFM2.5-VL-450M-Q4_0.gguf")!),
+            metadata: lfm25VL450MMetadata
+        )
+
+        let lfm25VL450MMMProj = ModelDescriptor(
+            id: "mmproj-LFM2.5-VL-450m-Q8_0.gguf",
+            name: "LFM2.5‑VL-450M mmproj (Q8_0)",
+            filename: "mmproj-LFM2.5-VL-450m-Q8_0.gguf",
+            kind: .mmproj,
+            source: .remote(url: URL(string: "https://hf-mirror.com/LiquidAI/LFM2.5-VL-450M-GGUF/resolve/main/mmproj-LFM2.5-VL-450m-Q8_0.gguf")!),
+            metadata: lfm25VL450MMetadata
+        )
+
+        let lfm25VL16B = ModelDescriptor(
+            id: "LFM2.5-VL-1.6B-Q4_0.gguf",
+            name: "LFM2.5‑VL-1.6B (Q4_0)",
+            filename: "LFM2.5-VL-1.6B-Q4_0.gguf",
+            pairedMMProjID: "mmproj-LFM2.5-VL-1.6b-Q8_0.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/LiquidAI/LFM2.5-VL-1.6B-GGUF/resolve/main/LFM2.5-VL-1.6B-Q4_0.gguf")!),
+            metadata: lfm25VL16BMetadata
+        )
+
+        let lfm25VL16BMMProj = ModelDescriptor(
+            id: "mmproj-LFM2.5-VL-1.6b-Q8_0.gguf",
+            name: "LFM2.5‑VL-1.6B mmproj (Q8_0)",
+            filename: "mmproj-LFM2.5-VL-1.6b-Q8_0.gguf",
+            kind: .mmproj,
+            source: .remote(url: URL(string: "https://hf-mirror.com/LiquidAI/LFM2.5-VL-1.6B-GGUF/resolve/main/mmproj-LFM2.5-VL-1.6b-Q8_0.gguf")!),
+            metadata: lfm25VL16BMetadata
+        )
+
         let miniCPM46 = ModelDescriptor(
             id: "MiniCPM-V-4_6-Q4_K_M.gguf",
             name: "MiniCPM-V 4.6 (Q4_K_M)",
@@ -800,7 +904,7 @@ final class ModelStore: ObservableObject {
             metadata: privacyMetadata
         )
 
-        catalog = [qwen, qwenMMProj, gemma4E2B, gemma4E2BMMProj, gemma4E4B, gemma4E4BMMProj, miniCPM46, miniCPM46Q8, miniCPM46F16, miniCPM46MMProj, miniCPM, miniCPM41, miniCPMV4, miniCPMV4MMProj, miniCPMMMProj, privacyFilter]
+        catalog = [qwen, qwenMMProj, gemma4E2B, gemma4E2BMMProj, gemma4E4B, gemma4E4BMMProj, lfm25_350M, lfm25_12B, lfm25_12BThinking, lfm25VL450M, lfm25VL450MMMProj, lfm25VL16B, lfm25VL16BMMProj, miniCPM46, miniCPM46Q8, miniCPM46F16, miniCPM46MMProj, miniCPM, miniCPM41, miniCPMV4, miniCPMV4MMProj, miniCPMMMProj, privacyFilter]
     }
 
 }
@@ -834,6 +938,11 @@ extension ModelDescriptor {
     var isGemma4: Bool {
         let haystack = "\(id) \(filename) \(name)".lowercased()
         return haystack.contains("gemma-4-e2b") || haystack.contains("gemma-4-e4b")
+    }
+
+    var isQwen35VLM: Bool {
+        let haystack = "\(id) \(filename) \(name)".lowercased()
+        return metadata.category == .vlm && haystack.contains("qwen3.5")
     }
 }
 

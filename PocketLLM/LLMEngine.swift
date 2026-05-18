@@ -18,10 +18,18 @@ private struct MemorySnapshot {
 }
 
 private enum MemoryProbe {
+    enum WaitMode: Equatable {
+        case standard
+        case strict
+    }
+
     private static let megabyte: UInt64 = 1024 * 1024
     private static let pollInterval: UInt64 = 250_000_000
-    private static let minimumWait: TimeInterval = 3.0
-    private static let maximumWait: TimeInterval = 12.0
+    private static let standardMinimumWait: TimeInterval = 3.0
+    private static let standardMaximumWait: TimeInterval = 12.0
+    private static let strictMinimumWait: TimeInterval = 6.0
+    private static let strictMaximumWait: TimeInterval = 24.0
+    private static let strictGraceWait: UInt64 = 1_500_000_000
     private static let meaningfulChange = 256 * megabyte
     private static let stableThreshold = 64 * megabyte
 
@@ -29,8 +37,11 @@ private enum MemoryProbe {
         MemorySnapshot(footprint: currentFootprint(), available: currentAvailableMemory())
     }
 
-    static func waitForRelease(after initial: MemorySnapshot, reason: String) async {
+    static func waitForRelease(after initial: MemorySnapshot, reason: String, mode: WaitMode = .standard) async {
         let start = CFAbsoluteTimeGetCurrent()
+        let minimumWait = mode == .strict ? strictMinimumWait : standardMinimumWait
+        let maximumWait = mode == .strict ? strictMaximumWait : standardMaximumWait
+        let requiredStableSamples = mode == .strict ? 12 : 6
         var last = snapshot()
         var lowFootprint = last.footprint ?? initial.footprint
         var highAvailable = last.available ?? initial.available
@@ -63,14 +74,26 @@ private enum MemoryProbe {
 
             let footprintReleased = released(from: initial.footprint, to: lowFootprint, direction: .decrease)
             let availableReleased = released(from: initial.available, to: highAvailable, direction: .increase)
-            if footprintReleased || availableReleased || stableSamples >= 6 {
-                print("Memory release wait (\(reason)) finished after \(String(format: "%.2f", elapsed))s, stableSamples=\(stableSamples), initial=\(describe(initial)), current=\(describe(current))")
+            let shouldFinish: Bool
+            if mode == .strict {
+                shouldFinish = stableSamples >= requiredStableSamples
+            } else {
+                shouldFinish = footprintReleased || availableReleased || stableSamples >= requiredStableSamples
+            }
+            if shouldFinish {
+                if mode == .strict {
+                    try? await Task.sleep(nanoseconds: strictGraceWait)
+                }
+                print("Memory release wait (\(reason), mode=\(mode)) finished after \(String(format: "%.2f", CFAbsoluteTimeGetCurrent() - start))s, stableSamples=\(stableSamples), initial=\(describe(initial)), current=\(describe(current))")
                 return
             }
         }
 
         let elapsed = CFAbsoluteTimeGetCurrent() - start
-        print("Memory release wait (\(reason)) timed out after \(String(format: "%.2f", elapsed))s, initial=\(describe(initial)), current=\(describe(last))")
+        if mode == .strict {
+            try? await Task.sleep(nanoseconds: strictGraceWait)
+        }
+        print("Memory release wait (\(reason), mode=\(mode)) timed out after \(String(format: "%.2f", elapsed))s, initial=\(describe(initial)), current=\(describe(last))")
     }
 
     private enum Direction {
@@ -138,6 +161,15 @@ private enum MemoryProbe {
 
 @MainActor
 final class ChatViewModel: ObservableObject {
+    private struct RuntimeProfile {
+        let imageMaxDimension: CGFloat
+        let imageMaxSlices: Int32
+        let batchSize: Int32
+        let ubatchSize: Int32
+        let imageEvalBatchSize: Int32
+        let forceMMProjCPU: Bool
+    }
+
     static let defaultSystemPrompt = "You are a helpful assistant. Reply in the same language as the user. If the user writes Chinese, reply in Chinese. Reply in Markdown. Use explicit line breaks: put each bullet/list item on its own line. Do not output <think> blocks."
     static let defaultMessages: [ChatMessage] = [
         ChatMessage(role: .system, text: defaultSystemPrompt)
@@ -214,6 +246,11 @@ final class ChatViewModel: ObservableObject {
     var topP: Float {
         get { settings.topP }
         set { settings.topP = max(0.0, min(1.0, newValue)) }
+    }
+
+    var repeatPenalty: Float {
+        get { settings.repeatPenalty }
+        set { settings.repeatPenalty = max(0.8, min(2.0, newValue)) }
     }
 
     var presencePenalty: Float {
@@ -348,8 +385,17 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
-    func leaveChat() {
+    func leaveChat(clearSession: Bool = false) {
         isChatActive = false
+        guard clearSession else { return }
+
+        stop()
+        messages = Self.defaultMessages
+        draft = ""
+        errorMessage = nil
+        streamingAssistantID = nil
+        pendingImage = nil
+        sessionStore.reset(messages: messages)
     }
 
     func send() {
@@ -414,25 +460,34 @@ final class ChatViewModel: ObservableObject {
                 let activeModel = modelStore.activeModel()
                 let isMiniCPMV46 = activeModel?.isMiniCPMV46 == true
                 let isGemma4 = activeModel?.isGemma4 == true
-                let effectiveTemperature = isGemma4 ? settings.gemmaTemperature : settings.temperature
-                let effectiveTopK = isMiniCPMV46 ? Int32(0) : settings.topK
-                let effectiveTopP = isMiniCPMV46 ? Float(1.0) : settings.topP
-                let effectivePresencePenalty = isMiniCPMV46 ? Float(0.0) : settings.presencePenalty
-                let effectiveFrequencyPenalty = isMiniCPMV46 ? Float(0.0) : settings.frequencyPenalty
+                let isQwen35 = activeModel?.isQwen35VLM == true
+                let runtimeProfile = self.runtimeProfile(for: activeModel)
+                let effectiveTemperature = isGemma4 ? settings.gemmaTemperature : ((isMiniCPMV46 || isQwen35) ? Float(0.7) : settings.temperature)
+                let effectiveTopK = isMiniCPMV46 ? Int32(100) : (isQwen35 ? Int32(20) : settings.topK)
+                let effectiveTopP = isMiniCPMV46 ? Float(0.8) : (isQwen35 ? Float(0.8) : settings.topP)
+                let effectiveRepeatPenalty = isMiniCPMV46 ? Float(1.05) : settings.repeatPenalty
+                let effectivePresencePenalty = isMiniCPMV46 ? Float(0.0) : (isQwen35 ? Float(1.5) : settings.presencePenalty)
+                let effectiveFrequencyPenalty = (isMiniCPMV46 || isQwen35) ? Float(0.0) : settings.frequencyPenalty
                 let effectiveUseGPU = isGemma4 ? settings.gemmaUseGPU : true
+                let effectiveContextLength = isMiniCPMV46 ? Int32(8192) : settings.contextLength
 
                 try await engine.loadIfNeeded(
                     modelURL: modelURL,
-                    contextLength: settings.contextLength,
+                    contextLength: effectiveContextLength,
                     temperature: effectiveTemperature,
                     topK: isGemma4 ? settings.gemmaTopK : effectiveTopK,
                     topP: isGemma4 ? settings.gemmaTopP : effectiveTopP,
+                    repeatPenalty: effectiveRepeatPenalty,
                     presencePenalty: effectivePresencePenalty,
                     frequencyPenalty: effectiveFrequencyPenalty,
                     mmprojURL: mmprojURL,
                     seed: settings.seed,
-                    imageMaxSlices: isMiniCPMV46 ? settings.miniCPMV46ImageSlices : 9,
-                    useGPU: effectiveUseGPU
+                    imageMaxSlices: runtimeProfile.imageMaxSlices,
+                    useGPU: effectiveUseGPU,
+                    batchSize: runtimeProfile.batchSize,
+                    ubatchSize: runtimeProfile.ubatchSize,
+                    imageEvalBatchSize: runtimeProfile.imageEvalBatchSize,
+                    forceMMProjCPU: runtimeProfile.forceMMProjCPU
                 )
 
         let prompt = PromptBuilder.buildPrompt(
@@ -532,7 +587,7 @@ final class ChatViewModel: ObservableObject {
             let memoryBeforeUnload = MemoryProbe.snapshot()
             await engine.unload()
             guard self.selectionRequestID == requestID else { return }
-            await MemoryProbe.waitForRelease(after: memoryBeforeUnload, reason: "model switch")
+            await MemoryProbe.waitForRelease(after: memoryBeforeUnload, reason: "model switch", mode: .strict)
             guard self.selectionRequestID == requestID else { return }
 
             self.modelLoadingMessage = "模型加载中"
@@ -579,8 +634,13 @@ final class ChatViewModel: ObservableObject {
         // Keep images smaller on iPhone to avoid huge mtmd/KV allocations.
         // Keep multimodal images small enough so visual tokens fit in a single batch on-device.
         // This is a stability tradeoff for iPhone memory / mtmd batching.
-        let maxImageDimension: CGFloat = modelStore.activeModel()?.isMiniCPMV46 == true ? 512 : 768
-        let scaled = image.scaledDown(maxDimension: maxImageDimension)
+        let maxImageDimension = runtimeProfile(for: modelStore.activeModel()).imageMaxDimension
+        let normalized = image.normalizedOrientation()
+        let scaled = normalized.scaledDown(maxPixelDimension: maxImageDimension)
+        let sourcePixels = image.debugSizeDescription
+        let normalizedPixels = normalized.debugSizeDescription
+        let scaledPixels = scaled.pixelSizeDescription
+        print("Image attachment scaled for \(modelStore.activeModel()?.name ?? "unknown model"): original=\(sourcePixels), normalized=\(normalizedPixels), scaled=\(scaledPixels), max=\(Int(maxImageDimension))px")
         guard let data = scaled.jpegData(compressionQuality: 0.9) else {
             throw NSError(domain: "PocketLLM", code: 2, userInfo: [NSLocalizedDescriptionKey: "JPEG encoding failed"])
         }
@@ -598,41 +658,99 @@ final class ChatViewModel: ObservableObject {
         let activeModel = modelStore.activeModel()
         let isMiniCPMV46 = activeModel?.isMiniCPMV46 == true
         let isGemma4 = activeModel?.isGemma4 == true
-        let temperature = isGemma4 ? settings.gemmaTemperature : settings.temperature
-        let topK = isGemma4 ? settings.gemmaTopK : (isMiniCPMV46 ? Int32(0) : settings.topK)
-        let topP = isGemma4 ? settings.gemmaTopP : (isMiniCPMV46 ? Float(1.0) : settings.topP)
-        let presencePenalty = isMiniCPMV46 ? Float(0.0) : settings.presencePenalty
-        let frequencyPenalty = isMiniCPMV46 ? Float(0.0) : settings.frequencyPenalty
-        let imageMaxSlices = isMiniCPMV46 ? settings.miniCPMV46ImageSlices : 9
+        let isQwen35 = activeModel?.isQwen35VLM == true
+        let runtimeProfile = runtimeProfile(for: activeModel)
+        let temperature = isGemma4 ? settings.gemmaTemperature : ((isMiniCPMV46 || isQwen35) ? Float(0.7) : settings.temperature)
+        let topK = isGemma4 ? settings.gemmaTopK : (isMiniCPMV46 ? Int32(100) : (isQwen35 ? Int32(20) : settings.topK))
+        let topP = isGemma4 ? settings.gemmaTopP : (isMiniCPMV46 ? Float(0.8) : (isQwen35 ? Float(0.8) : settings.topP))
+        let repeatPenalty = isMiniCPMV46 ? Float(1.05) : settings.repeatPenalty
+        let presencePenalty = isMiniCPMV46 ? Float(0.0) : (isQwen35 ? Float(1.5) : settings.presencePenalty)
+        let frequencyPenalty = (isMiniCPMV46 || isQwen35) ? Float(0.0) : settings.frequencyPenalty
         let useGPU = isGemma4 ? settings.gemmaUseGPU : true
+        let contextLength = isMiniCPMV46 ? Int32(8192) : settings.contextLength
+        print("Loading model profile for \(activeModel?.name ?? "unknown model"): imageMax=\(Int(runtimeProfile.imageMaxDimension))px, slices=\(runtimeProfile.imageMaxSlices), n_batch=\(runtimeProfile.batchSize), n_ubatch=\(runtimeProfile.ubatchSize), imageEvalBatch=\(runtimeProfile.imageEvalBatchSize), forceMMProjCPU=\(runtimeProfile.forceMMProjCPU), useGPU=\(useGPU)")
 
         try await engine.loadIfNeeded(
             modelURL: modelURL,
-            contextLength: settings.contextLength,
+            contextLength: contextLength,
             temperature: temperature,
             topK: topK,
             topP: topP,
+            repeatPenalty: repeatPenalty,
             presencePenalty: presencePenalty,
             frequencyPenalty: frequencyPenalty,
             mmprojURL: mmprojURL,
             seed: settings.seed,
-            imageMaxSlices: imageMaxSlices,
-            useGPU: useGPU
+            imageMaxSlices: runtimeProfile.imageMaxSlices,
+            useGPU: useGPU,
+            batchSize: runtimeProfile.batchSize,
+            ubatchSize: runtimeProfile.ubatchSize,
+            imageEvalBatchSize: runtimeProfile.imageEvalBatchSize,
+            forceMMProjCPU: runtimeProfile.forceMMProjCPU
         )
+    }
+
+    private func runtimeProfile(for model: ModelDescriptor?) -> RuntimeProfile {
+        if model?.isQwen35VLM == true {
+            return RuntimeProfile(imageMaxDimension: 672, imageMaxSlices: 1, batchSize: 512, ubatchSize: 512, imageEvalBatchSize: 512, forceMMProjCPU: false)
+        }
+
+        if model?.isMiniCPMV46 == true {
+            return RuntimeProfile(imageMaxDimension: 448, imageMaxSlices: settings.miniCPMV46ImageSlices, batchSize: 1024, ubatchSize: 1024, imageEvalBatchSize: 1024, forceMMProjCPU: false)
+        }
+
+        if model?.isGemma4 == true {
+            return RuntimeProfile(imageMaxDimension: 512, imageMaxSlices: 1, batchSize: 768, ubatchSize: 512, imageEvalBatchSize: 512, forceMMProjCPU: false)
+        }
+
+        if model?.metadata.category == .vlm {
+            return RuntimeProfile(imageMaxDimension: 512, imageMaxSlices: 1, batchSize: 512, ubatchSize: 512, imageEvalBatchSize: 512, forceMMProjCPU: false)
+        }
+
+        return RuntimeProfile(imageMaxDimension: 768, imageMaxSlices: 1, batchSize: 768, ubatchSize: 768, imageEvalBatchSize: 768, forceMMProjCPU: false)
     }
 
 }
 
 private extension UIImage {
-    func scaledDown(maxDimension: CGFloat) -> UIImage {
-        let size = self.size
-        let maxSide = max(size.width, size.height)
-        guard maxSide > maxDimension, maxSide > 0 else { return self }
+    var pixelSize: CGSize {
+        if let cgImage {
+            return CGSize(width: cgImage.width, height: cgImage.height)
+        }
+        return CGSize(width: size.width * scale, height: size.height * scale)
+    }
 
-        let scale = maxDimension / maxSide
-        let newSize = CGSize(width: size.width * scale, height: size.height * scale)
+    var pixelSizeDescription: String {
+        let pixels = pixelSize
+        return "\(Int(pixels.width))x\(Int(pixels.height))"
+    }
 
-        let renderer = UIGraphicsImageRenderer(size: newSize)
+    var debugSizeDescription: String {
+        "points=\(Int(size.width))x\(Int(size.height)), scale=\(String(format: "%.1f", scale)), pixels=\(pixelSizeDescription), orientation=\(imageOrientation.rawValue)"
+    }
+
+    func normalizedOrientation() -> UIImage {
+        guard imageOrientation != .up else { return self }
+
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = scale
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
+        return renderer.image { _ in
+            draw(in: CGRect(origin: .zero, size: size))
+        }
+    }
+
+    func scaledDown(maxPixelDimension: CGFloat) -> UIImage {
+        let pixels = pixelSize
+        let maxSide = max(pixels.width, pixels.height)
+        guard maxSide > maxPixelDimension, maxSide > 0 else { return self }
+
+        let resizeScale = maxPixelDimension / maxSide
+        let newSize = CGSize(width: pixels.width * resizeScale, height: pixels.height * resizeScale)
+
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        let renderer = UIGraphicsImageRenderer(size: newSize, format: format)
         return renderer.image { _ in
             self.draw(in: CGRect(origin: .zero, size: newSize))
         }
@@ -653,12 +771,17 @@ actor LLMEngine {
     private var loadedTemperature: Float?
     private var loadedTopK: Int32?
     private var loadedTopP: Float?
+    private var loadedRepeatPenalty: Float?
     private var loadedPresencePenalty: Float?
     private var loadedFrequencyPenalty: Float?
     private var loadedMMProjPath: String?
     private var loadedSeed: UInt32?
     private var loadedImageMaxSlices: Int32?
     private var loadedUseGPU: Bool?
+    private var loadedBatchSize: Int32?
+    private var loadedUbatchSize: Int32?
+    private var loadedImageEvalBatchSize: Int32?
+    private var loadedForceMMProjCPU: Bool?
     private var lifecycleOperationID = UUID()
     private var contextCloseTask: Task<Void, Never>?
     private var contextCloseTaskID: UUID?
@@ -669,12 +792,17 @@ actor LLMEngine {
         temperature: Float,
         topK: Int32,
         topP: Float,
+        repeatPenalty: Float,
         presencePenalty: Float,
         frequencyPenalty: Float,
         mmprojURL: URL?,
         seed: UInt32,
         imageMaxSlices: Int32,
-        useGPU: Bool
+        useGPU: Bool,
+        batchSize: Int32,
+        ubatchSize: Int32,
+        imageEvalBatchSize: Int32,
+        forceMMProjCPU: Bool
     ) async throws {
         let path = modelURL.path
         let mmprojPath = mmprojURL?.path
@@ -686,6 +814,10 @@ actor LLMEngine {
             || (loadedMMProjPath != mmprojPath)
             || (loadedImageMaxSlices != imageMaxSlices)
             || (loadedUseGPU != useGPU)
+            || (loadedBatchSize != batchSize)
+            || (loadedUbatchSize != ubatchSize)
+            || (loadedImageEvalBatchSize != imageEvalBatchSize)
+            || (loadedForceMMProjCPU != forceMMProjCPU)
 
         if needsReload {
             let operationID = UUID()
@@ -707,12 +839,17 @@ actor LLMEngine {
                     temperature: temperature,
                     topK: topK,
                     topP: topP,
+                    repeatPenalty: repeatPenalty,
                     presencePenalty: presencePenalty,
                     frequencyPenalty: frequencyPenalty,
                     mmprojPath: mmprojPath,
                     seed: seed,
                     imageMaxSlices: imageMaxSlices,
-                    useGPU: useGPU
+                    useGPU: useGPU,
+                    batchSize: batchSize,
+                    ubatchSize: ubatchSize,
+                    imageEvalBatchSize: imageEvalBatchSize,
+                    forceMMProjCPU: forceMMProjCPU
                 )
             }
             try Task.checkCancellation()
@@ -725,12 +862,17 @@ actor LLMEngine {
             loadedTemperature = temperature
             loadedTopK = topK
             loadedTopP = topP
+            loadedRepeatPenalty = repeatPenalty
             loadedPresencePenalty = presencePenalty
             loadedFrequencyPenalty = frequencyPenalty
             loadedMMProjPath = mmprojPath
             loadedSeed = seed
             loadedImageMaxSlices = imageMaxSlices
             loadedUseGPU = useGPU
+            loadedBatchSize = batchSize
+            loadedUbatchSize = ubatchSize
+            loadedImageEvalBatchSize = imageEvalBatchSize
+            loadedForceMMProjCPU = forceMMProjCPU
             return
         }
 
@@ -738,6 +880,7 @@ actor LLMEngine {
         if loadedTemperature != temperature
             || loadedTopK != topK
             || loadedTopP != topP
+            || loadedRepeatPenalty != repeatPenalty
             || loadedPresencePenalty != presencePenalty
             || loadedFrequencyPenalty != frequencyPenalty
             || loadedSeed != seed {
@@ -745,6 +888,7 @@ actor LLMEngine {
                 temperature: temperature,
                 topK: topK,
                 topP: topP,
+                repeatPenalty: repeatPenalty,
                 presencePenalty: presencePenalty,
                 frequencyPenalty: frequencyPenalty,
                 seed: seed
@@ -752,6 +896,7 @@ actor LLMEngine {
             loadedTemperature = temperature
             loadedTopK = topK
             loadedTopP = topP
+            loadedRepeatPenalty = repeatPenalty
             loadedPresencePenalty = presencePenalty
             loadedFrequencyPenalty = frequencyPenalty
             loadedSeed = seed
@@ -885,12 +1030,17 @@ actor LLMEngine {
         loadedTemperature = nil
         loadedTopK = nil
         loadedTopP = nil
+        loadedRepeatPenalty = nil
         loadedPresencePenalty = nil
         loadedFrequencyPenalty = nil
         loadedMMProjPath = nil
         loadedSeed = nil
         loadedImageMaxSlices = nil
         loadedUseGPU = nil
+        loadedBatchSize = nil
+        loadedUbatchSize = nil
+        loadedImageEvalBatchSize = nil
+        loadedForceMMProjCPU = nil
 
         if let currentContext {
             let closeID = UUID()

@@ -9,6 +9,7 @@ final class GenerationSettings: ObservableObject {
     @Published var temperature: Float = 0.7
     @Published var topK: Int32 = 40
     @Published var topP: Float = 0.95
+    @Published var repeatPenalty: Float = 1.0
     @Published var presencePenalty: Float = 0.3
     @Published var frequencyPenalty: Float = 0.3
 
