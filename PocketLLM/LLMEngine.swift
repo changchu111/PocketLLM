@@ -18,18 +18,10 @@ private struct MemorySnapshot {
 }
 
 private enum MemoryProbe {
-    enum WaitMode: Equatable {
-        case standard
-        case strict
-    }
-
     private static let megabyte: UInt64 = 1024 * 1024
     private static let pollInterval: UInt64 = 250_000_000
-    private static let standardMinimumWait: TimeInterval = 3.0
-    private static let standardMaximumWait: TimeInterval = 12.0
-    private static let strictMinimumWait: TimeInterval = 6.0
-    private static let strictMaximumWait: TimeInterval = 24.0
-    private static let strictGraceWait: UInt64 = 1_500_000_000
+    private static let minimumWait: TimeInterval = 0.75
+    private static let maximumWait: TimeInterval = 6.0
     private static let meaningfulChange = 256 * megabyte
     private static let stableThreshold = 64 * megabyte
 
@@ -37,11 +29,8 @@ private enum MemoryProbe {
         MemorySnapshot(footprint: currentFootprint(), available: currentAvailableMemory())
     }
 
-    static func waitForRelease(after initial: MemorySnapshot, reason: String, mode: WaitMode = .standard) async {
+    static func waitForRelease(after initial: MemorySnapshot, reason: String) async {
         let start = CFAbsoluteTimeGetCurrent()
-        let minimumWait = mode == .strict ? strictMinimumWait : standardMinimumWait
-        let maximumWait = mode == .strict ? strictMaximumWait : standardMaximumWait
-        let requiredStableSamples = mode == .strict ? 12 : 6
         var last = snapshot()
         var lowFootprint = last.footprint ?? initial.footprint
         var highAvailable = last.available ?? initial.available
@@ -74,26 +63,14 @@ private enum MemoryProbe {
 
             let footprintReleased = released(from: initial.footprint, to: lowFootprint, direction: .decrease)
             let availableReleased = released(from: initial.available, to: highAvailable, direction: .increase)
-            let shouldFinish: Bool
-            if mode == .strict {
-                shouldFinish = stableSamples >= requiredStableSamples
-            } else {
-                shouldFinish = footprintReleased || availableReleased || stableSamples >= requiredStableSamples
-            }
-            if shouldFinish {
-                if mode == .strict {
-                    try? await Task.sleep(nanoseconds: strictGraceWait)
-                }
-                print("Memory release wait (\(reason), mode=\(mode)) finished after \(String(format: "%.2f", CFAbsoluteTimeGetCurrent() - start))s, stableSamples=\(stableSamples), initial=\(describe(initial)), current=\(describe(current))")
+            if footprintReleased || availableReleased || stableSamples >= 4 {
+                print("Memory release wait (\(reason)) finished after \(String(format: "%.2f", CFAbsoluteTimeGetCurrent() - start))s, stableSamples=\(stableSamples), initial=\(describe(initial)), current=\(describe(current))")
                 return
             }
         }
 
         let elapsed = CFAbsoluteTimeGetCurrent() - start
-        if mode == .strict {
-            try? await Task.sleep(nanoseconds: strictGraceWait)
-        }
-        print("Memory release wait (\(reason), mode=\(mode)) timed out after \(String(format: "%.2f", elapsed))s, initial=\(describe(initial)), current=\(describe(last))")
+        print("Memory release wait (\(reason)) timed out after \(String(format: "%.2f", elapsed))s, initial=\(describe(initial)), current=\(describe(last))")
     }
 
     private enum Direction {
@@ -163,6 +140,7 @@ private enum MemoryProbe {
 final class ChatViewModel: ObservableObject {
     private struct RuntimeProfile {
         let imageMaxDimension: CGFloat
+        let useOriginalImage: Bool
         let imageMaxSlices: Int32
         let batchSize: Int32
         let ubatchSize: Int32
@@ -181,8 +159,11 @@ final class ChatViewModel: ObservableObject {
     @Published var isSwitchingModel = false
     @Published var modelLoadingMessage: String = "模型加载中"
     @Published var errorMessage: String?
+    @Published var modelLoadFailed = false
     @Published var streamingAssistantID: UUID?
     @Published var pendingImage: PlatformImage?
+    @Published var showingModelSettings = false
+    private var resetContextOnNextSend = false
 
     private let modelStore: ModelStore
     private let settings: GenerationSettings
@@ -213,6 +194,10 @@ final class ChatViewModel: ObservableObject {
 
     var activeModelIsGemma4: Bool {
         modelStore.activeModel()?.isGemma4 == true
+    }
+
+    var activeModelIsQwen35VLM: Bool {
+        modelStore.activeModel()?.isQwen35VLM == true
     }
 
     var activeModelIsVLM: Bool {
@@ -273,8 +258,89 @@ final class ChatViewModel: ObservableObject {
         set { settings.miniCPMV46ImageSlices = max(1, min(9, newValue)) }
     }
 
+    var miniCPMV46MaxNewTokens: Int32 { settings.miniCPMV46MaxNewTokens }
+    var miniCPMV46Temperature: Float { settings.miniCPMV46Temperature }
+    var miniCPMV46TopK: Int32 { settings.miniCPMV46TopK }
+    var miniCPMV46TopP: Float { settings.miniCPMV46TopP }
+    var miniCPMV46RepeatPenalty: Float { settings.miniCPMV46RepeatPenalty }
+
+    func applyMiniCPMV46Settings(maxNewTokens: Int32, temperature: Float, topK: Int32, topP: Float, repeatPenalty: Float, imageSlices: Int32) {
+        settings.miniCPMV46MaxNewTokens = max(16, min(4096, maxNewTokens))
+        settings.miniCPMV46Temperature = max(0.0, min(1.5, temperature))
+        settings.miniCPMV46TopK = max(0, min(200, topK))
+        settings.miniCPMV46TopP = max(0.0, min(1.0, topP))
+        settings.miniCPMV46RepeatPenalty = max(0.8, min(2.0, repeatPenalty))
+        settings.miniCPMV46ImageSlices = max(1, min(9, imageSlices))
+        handleSelectionChange()
+    }
+
     func randomizeSeed() {
         settings.seed = UInt32.random(in: 1...UInt32.max)
+    }
+
+    var activeVLMRuntimeSettings: VLMRuntimeSettings {
+        let model = modelStore.activeModel()
+        if model?.isQwen35VLM == true {
+            return VLMRuntimeSettings(imageMaxDimension: settings.qwen35ImageMaxDimension, useOriginalImage: settings.qwen35UseOriginalImage, imageMaxSlices: settings.qwen35ImageMaxSlices, batchSize: settings.qwen35BatchSize, ubatchSize: settings.qwen35UbatchSize, imageEvalBatchSize: settings.qwen35ImageEvalBatchSize, forceMMProjCPU: settings.qwen35ForceMMProjCPU)
+        }
+        if model?.isMiniCPMV46 == true {
+            return VLMRuntimeSettings(imageMaxDimension: settings.miniCPMV46ImageMaxDimension, useOriginalImage: settings.miniCPMV46UseOriginalImage, imageMaxSlices: settings.miniCPMV46ImageSlices, batchSize: settings.miniCPMV46BatchSize, ubatchSize: settings.miniCPMV46UbatchSize, imageEvalBatchSize: settings.miniCPMV46ImageEvalBatchSize, forceMMProjCPU: settings.miniCPMV46ForceMMProjCPU)
+        }
+        if model?.isGemma4 == true {
+            return VLMRuntimeSettings(imageMaxDimension: settings.gemmaImageMaxDimension, useOriginalImage: settings.gemmaUseOriginalImage, imageMaxSlices: settings.gemmaImageMaxSlices, batchSize: settings.gemmaBatchSize, ubatchSize: settings.gemmaUbatchSize, imageEvalBatchSize: settings.gemmaImageEvalBatchSize, forceMMProjCPU: settings.gemmaForceMMProjCPU)
+        }
+        return VLMRuntimeSettings(imageMaxDimension: settings.genericVLMImageMaxDimension, useOriginalImage: settings.genericVLMUseOriginalImage, imageMaxSlices: settings.genericVLMImageMaxSlices, batchSize: settings.genericVLMBatchSize, ubatchSize: settings.genericVLMUbatchSize, imageEvalBatchSize: settings.genericVLMImageEvalBatchSize, forceMMProjCPU: settings.genericVLMForceMMProjCPU)
+    }
+
+    func applyActiveVLMRuntimeSettings(_ runtime: VLMRuntimeSettings) {
+        let model = modelStore.activeModel()
+        let imageMaxDimension = Self.quantizedImageDimension(runtime.imageMaxDimension, for: model)
+        let useOriginalImage = model?.isQwen35VLM == true ? false : runtime.useOriginalImage
+        let imageMaxSlices = max(Int32(1), min(Int32(9), runtime.imageMaxSlices))
+        let batchSize = max(Int32(256), min(Int32(1024), runtime.batchSize))
+        let ubatchSize = max(Int32(256), min(Int32(1024), runtime.ubatchSize))
+        let imageEvalBatchSize = max(Int32(128), min(Int32(1024), runtime.imageEvalBatchSize))
+        if model?.isQwen35VLM == true {
+            settings.qwen35ImageMaxDimension = imageMaxDimension
+            settings.qwen35UseOriginalImage = useOriginalImage
+            settings.qwen35ImageMaxSlices = imageMaxSlices
+            settings.qwen35BatchSize = batchSize
+            settings.qwen35UbatchSize = ubatchSize
+            settings.qwen35ImageEvalBatchSize = imageEvalBatchSize
+            settings.qwen35ForceMMProjCPU = runtime.forceMMProjCPU
+        } else if model?.isMiniCPMV46 == true {
+            settings.miniCPMV46ImageMaxDimension = imageMaxDimension
+            settings.miniCPMV46UseOriginalImage = useOriginalImage
+            settings.miniCPMV46ImageSlices = imageMaxSlices
+            settings.miniCPMV46BatchSize = batchSize
+            settings.miniCPMV46UbatchSize = ubatchSize
+            settings.miniCPMV46ImageEvalBatchSize = imageEvalBatchSize
+            settings.miniCPMV46ForceMMProjCPU = runtime.forceMMProjCPU
+        } else if model?.isGemma4 == true {
+            settings.gemmaImageMaxDimension = imageMaxDimension
+            settings.gemmaUseOriginalImage = useOriginalImage
+            settings.gemmaImageMaxSlices = imageMaxSlices
+            settings.gemmaBatchSize = batchSize
+            settings.gemmaUbatchSize = ubatchSize
+            settings.gemmaImageEvalBatchSize = imageEvalBatchSize
+            settings.gemmaForceMMProjCPU = runtime.forceMMProjCPU
+        } else {
+            settings.genericVLMImageMaxDimension = imageMaxDimension
+            settings.genericVLMUseOriginalImage = useOriginalImage
+            settings.genericVLMImageMaxSlices = imageMaxSlices
+            settings.genericVLMBatchSize = batchSize
+            settings.genericVLMUbatchSize = ubatchSize
+            settings.genericVLMImageEvalBatchSize = imageEvalBatchSize
+            settings.genericVLMForceMMProjCPU = runtime.forceMMProjCPU
+        }
+        handleSelectionChange()
+    }
+
+    private static func quantizedImageDimension(_ value: Float, for model: ModelDescriptor?) -> Float {
+        let upperBound: Float = 1680
+        let lowerBound: Float = model?.isQwen35VLM == true ? 448 : 768
+        let clamped = max(lowerBound, min(upperBound, value))
+        return Float((clamped / 16).rounded() * 16)
     }
 
     var gemmaMaxNewTokens: Int32 { settings.gemmaMaxNewTokens }
@@ -352,6 +418,7 @@ final class ChatViewModel: ObservableObject {
             messages = Self.defaultMessages
             draft = ""
             errorMessage = nil
+            modelLoadFailed = false
             streamingAssistantID = nil
             pendingImage = nil
             sessionStore.reset(messages: messages)
@@ -374,15 +441,22 @@ final class ChatViewModel: ObservableObject {
             do {
                 try await self.loadActiveModelForCurrentSelection()
                 guard self.selectionRequestID == requestID else { return }
+                self.modelLoadFailed = false
                 self.isSwitchingModel = false
             } catch is CancellationError {
                 // chat disappeared or selection changed
             } catch {
                 guard self.selectionRequestID == requestID else { return }
-                self.errorMessage = error.localizedDescription
+                self.reportLoadError(error)
                 self.isSwitchingModel = false
             }
         }
+    }
+
+    func retryModelLoad() {
+        errorMessage = nil
+        modelLoadFailed = false
+        handleSelectionChange()
     }
 
     func leaveChat(clearSession: Bool = false) {
@@ -393,6 +467,7 @@ final class ChatViewModel: ObservableObject {
         messages = Self.defaultMessages
         draft = ""
         errorMessage = nil
+        modelLoadFailed = false
         streamingAssistantID = nil
         pendingImage = nil
         sessionStore.reset(messages: messages)
@@ -410,6 +485,8 @@ final class ChatViewModel: ObservableObject {
         guard !text.isEmpty || image != nil else { return }
         draft = ""
         errorMessage = nil
+        let shouldResetContextForPrompt = resetContextOnNextSend
+        resetContextOnNextSend = false
 
         // Single-image mode: each new image starts a fresh visual context.
         // Keep only the system prompt to avoid carrying prior image-heavy history
@@ -429,7 +506,7 @@ final class ChatViewModel: ObservableObject {
         let userMessageID = UUID()
         messages.append(ChatMessage(id: userMessageID, role: .user, text: text, attachments: attachments))
         pendingImage = nil
-        let promptSnapshot = messages // exclude the streaming placeholder
+        let promptSnapshot = (image != nil || shouldResetContextForPrompt) ? Self.defaultMessages + [messages.last!] : messages // exclude the streaming placeholder
 
         let assistantID = UUID()
         streamingAssistantID = assistantID
@@ -462,10 +539,10 @@ final class ChatViewModel: ObservableObject {
                 let isGemma4 = activeModel?.isGemma4 == true
                 let isQwen35 = activeModel?.isQwen35VLM == true
                 let runtimeProfile = self.runtimeProfile(for: activeModel)
-                let effectiveTemperature = isGemma4 ? settings.gemmaTemperature : ((isMiniCPMV46 || isQwen35) ? Float(0.7) : settings.temperature)
-                let effectiveTopK = isMiniCPMV46 ? Int32(100) : (isQwen35 ? Int32(20) : settings.topK)
-                let effectiveTopP = isMiniCPMV46 ? Float(0.8) : (isQwen35 ? Float(0.8) : settings.topP)
-                let effectiveRepeatPenalty = isMiniCPMV46 ? Float(1.05) : settings.repeatPenalty
+                let effectiveTemperature = isGemma4 ? settings.gemmaTemperature : (isMiniCPMV46 ? settings.miniCPMV46Temperature : (isQwen35 ? Float(0.7) : settings.temperature))
+                let effectiveTopK = isMiniCPMV46 ? settings.miniCPMV46TopK : (isQwen35 ? Int32(20) : settings.topK)
+                let effectiveTopP = isMiniCPMV46 ? settings.miniCPMV46TopP : (isQwen35 ? Float(0.8) : settings.topP)
+                let effectiveRepeatPenalty = isMiniCPMV46 ? settings.miniCPMV46RepeatPenalty : settings.repeatPenalty
                 let effectivePresencePenalty = isMiniCPMV46 ? Float(0.0) : (isQwen35 ? Float(1.5) : settings.presencePenalty)
                 let effectiveFrequencyPenalty = (isMiniCPMV46 || isQwen35) ? Float(0.0) : settings.frequencyPenalty
                 let effectiveUseGPU = isGemma4 ? settings.gemmaUseGPU : true
@@ -497,7 +574,7 @@ final class ChatViewModel: ObservableObject {
             maxRecentRounds: 2,
             gemmaThinkingEnabled: isGemma4 && settings.gemmaThinkingEnabled
         )
-                let maxNewTokens = isGemma4 ? settings.gemmaMaxNewTokens : settings.maxNewTokens
+                let maxNewTokens = isGemma4 ? settings.gemmaMaxNewTokens : (isMiniCPMV46 ? settings.miniCPMV46MaxNewTokens : settings.maxNewTokens)
                 let metrics = try await engine.generate(prompt: prompt, imageURL: imageURL, maxNewTokens: maxNewTokens, requestStartedAt: requestStartedAt) { token in
                     if let idx = self.messages.firstIndex(where: { $0.id == assistantID }) {
                         // Streaming: do NOT trim trailing newlines, otherwise list formatting breaks
@@ -519,6 +596,8 @@ final class ChatViewModel: ObservableObject {
                 }
             } catch is CancellationError {
                 // user stopped generation
+            } catch let error as LlamaError where error.isMemoryOverflowLike {
+                await self.handleMemoryOverflowDuringGeneration(assistantID: assistantID)
             } catch {
                 self.errorMessage = error.localizedDescription
             }
@@ -533,6 +612,18 @@ final class ChatViewModel: ObservableObject {
         Task { await engine.stop() }
         isGenerating = false
         streamingAssistantID = nil
+    }
+
+    private func handleMemoryOverflowDuringGeneration(assistantID: UUID) async {
+        await engine.stop()
+        await engine.unload()
+        if let idx = messages.firstIndex(where: { $0.id == assistantID }) {
+            messages.remove(at: idx)
+        }
+        errorMessage = "内存溢出，请尝试调整图片分辨率设置"
+        resetContextOnNextSend = true
+        modelLoadFailed = false
+        isSwitchingModel = false
     }
 
     private func handleSelectionChange(loadingMessage: String? = nil) {
@@ -587,28 +678,55 @@ final class ChatViewModel: ObservableObject {
             let memoryBeforeUnload = MemoryProbe.snapshot()
             await engine.unload()
             guard self.selectionRequestID == requestID else { return }
-            await MemoryProbe.waitForRelease(after: memoryBeforeUnload, reason: "model switch", mode: .strict)
-            guard self.selectionRequestID == requestID else { return }
 
             self.modelLoadingMessage = "模型加载中"
             do {
                 try await self.loadActiveModelForCurrentSelection()
                 guard self.selectionRequestID == requestID else { return }
+                self.modelLoadFailed = false
                 self.isSwitchingModel = false
+            } catch let error as LlamaError where LLMEngine.shouldRetryLoad(after: error) {
+                guard self.selectionRequestID == requestID else { return }
+                print("Model switch load failed after explicit unload (\(error)). Waiting for prior model memory release and retrying once.")
+                await MemoryProbe.waitForRelease(after: memoryBeforeUnload, reason: "model switch retry")
+                guard self.selectionRequestID == requestID else { return }
+                do {
+                    try await self.loadActiveModelForCurrentSelection()
+                    guard self.selectionRequestID == requestID else { return }
+                    self.modelLoadFailed = false
+                    self.isSwitchingModel = false
+                } catch is CancellationError {
+                    // selection changed again
+                } catch {
+                    guard self.selectionRequestID == requestID else { return }
+                    self.reportLoadError(error)
+                    self.isSwitchingModel = false
+                }
             } catch is CancellationError {
                 // selection changed again
             } catch {
                 guard self.selectionRequestID == requestID else { return }
-                self.errorMessage = error.localizedDescription
+                self.reportLoadError(error)
                 self.isSwitchingModel = false
             }
         }
+    }
+
+    private func reportLoadError(_ error: Error) {
+        if let llamaError = error as? LlamaError, LLMEngine.shouldRetryLoad(after: llamaError) {
+            errorMessage = "模型加载失败"
+            modelLoadFailed = true
+            return
+        }
+        errorMessage = error.localizedDescription
+        modelLoadFailed = false
     }
 
     func clearChat() {
         stop()
         messages = Self.defaultMessages
         errorMessage = nil
+        modelLoadFailed = false
         streamingAssistantID = nil
         pendingImage = nil
         sessionStore.reset(messages: messages)
@@ -619,6 +737,7 @@ final class ChatViewModel: ObservableObject {
         stop()
         messages = Self.defaultMessages
         errorMessage = nil
+        modelLoadFailed = false
         streamingAssistantID = nil
         pendingImage = nil
         draft = prompt
@@ -634,13 +753,15 @@ final class ChatViewModel: ObservableObject {
         // Keep images smaller on iPhone to avoid huge mtmd/KV allocations.
         // Keep multimodal images small enough so visual tokens fit in a single batch on-device.
         // This is a stability tradeoff for iPhone memory / mtmd batching.
-        let maxImageDimension = runtimeProfile(for: modelStore.activeModel()).imageMaxDimension
+        let runtimeProfile = runtimeProfile(for: modelStore.activeModel())
+        let maxImageDimension = runtimeProfile.imageMaxDimension
         let normalized = image.normalizedOrientation()
-        let scaled = normalized.scaledDown(maxPixelDimension: maxImageDimension)
+        let allowOriginalImage = modelStore.activeModel()?.isQwen35VLM == true ? false : runtimeProfile.useOriginalImage
+        let scaled = allowOriginalImage ? normalized : normalized.scaledDown(maxPixelDimension: maxImageDimension)
         let sourcePixels = image.debugSizeDescription
         let normalizedPixels = normalized.debugSizeDescription
         let scaledPixels = scaled.pixelSizeDescription
-        print("Image attachment scaled for \(modelStore.activeModel()?.name ?? "unknown model"): original=\(sourcePixels), normalized=\(normalizedPixels), scaled=\(scaledPixels), max=\(Int(maxImageDimension))px")
+        print("Image attachment scaled for \(modelStore.activeModel()?.name ?? "unknown model"): original=\(sourcePixels), normalized=\(normalizedPixels), scaled=\(scaledPixels), max=\(Int(maxImageDimension))px, originalMode=\(allowOriginalImage)")
         guard let data = scaled.jpegData(compressionQuality: 0.9) else {
             throw NSError(domain: "PocketLLM", code: 2, userInfo: [NSLocalizedDescriptionKey: "JPEG encoding failed"])
         }
@@ -660,10 +781,10 @@ final class ChatViewModel: ObservableObject {
         let isGemma4 = activeModel?.isGemma4 == true
         let isQwen35 = activeModel?.isQwen35VLM == true
         let runtimeProfile = runtimeProfile(for: activeModel)
-        let temperature = isGemma4 ? settings.gemmaTemperature : ((isMiniCPMV46 || isQwen35) ? Float(0.7) : settings.temperature)
-        let topK = isGemma4 ? settings.gemmaTopK : (isMiniCPMV46 ? Int32(100) : (isQwen35 ? Int32(20) : settings.topK))
-        let topP = isGemma4 ? settings.gemmaTopP : (isMiniCPMV46 ? Float(0.8) : (isQwen35 ? Float(0.8) : settings.topP))
-        let repeatPenalty = isMiniCPMV46 ? Float(1.05) : settings.repeatPenalty
+        let temperature = isGemma4 ? settings.gemmaTemperature : (isMiniCPMV46 ? settings.miniCPMV46Temperature : (isQwen35 ? Float(0.7) : settings.temperature))
+        let topK = isGemma4 ? settings.gemmaTopK : (isMiniCPMV46 ? settings.miniCPMV46TopK : (isQwen35 ? Int32(20) : settings.topK))
+        let topP = isGemma4 ? settings.gemmaTopP : (isMiniCPMV46 ? settings.miniCPMV46TopP : (isQwen35 ? Float(0.8) : settings.topP))
+        let repeatPenalty = isMiniCPMV46 ? settings.miniCPMV46RepeatPenalty : settings.repeatPenalty
         let presencePenalty = isMiniCPMV46 ? Float(0.0) : (isQwen35 ? Float(1.5) : settings.presencePenalty)
         let frequencyPenalty = (isMiniCPMV46 || isQwen35) ? Float(0.0) : settings.frequencyPenalty
         let useGPU = isGemma4 ? settings.gemmaUseGPU : true
@@ -692,22 +813,22 @@ final class ChatViewModel: ObservableObject {
 
     private func runtimeProfile(for model: ModelDescriptor?) -> RuntimeProfile {
         if model?.isQwen35VLM == true {
-            return RuntimeProfile(imageMaxDimension: 672, imageMaxSlices: 1, batchSize: 512, ubatchSize: 512, imageEvalBatchSize: 512, forceMMProjCPU: false)
+            return RuntimeProfile(imageMaxDimension: CGFloat(settings.qwen35ImageMaxDimension), useOriginalImage: settings.qwen35UseOriginalImage, imageMaxSlices: settings.qwen35ImageMaxSlices, batchSize: settings.qwen35BatchSize, ubatchSize: settings.qwen35UbatchSize, imageEvalBatchSize: settings.qwen35ImageEvalBatchSize, forceMMProjCPU: settings.qwen35ForceMMProjCPU)
         }
 
         if model?.isMiniCPMV46 == true {
-            return RuntimeProfile(imageMaxDimension: 448, imageMaxSlices: settings.miniCPMV46ImageSlices, batchSize: 1024, ubatchSize: 1024, imageEvalBatchSize: 1024, forceMMProjCPU: false)
+            return RuntimeProfile(imageMaxDimension: CGFloat(settings.miniCPMV46ImageMaxDimension), useOriginalImage: settings.miniCPMV46UseOriginalImage, imageMaxSlices: settings.miniCPMV46ImageSlices, batchSize: settings.miniCPMV46BatchSize, ubatchSize: settings.miniCPMV46UbatchSize, imageEvalBatchSize: settings.miniCPMV46ImageEvalBatchSize, forceMMProjCPU: settings.miniCPMV46ForceMMProjCPU)
         }
 
         if model?.isGemma4 == true {
-            return RuntimeProfile(imageMaxDimension: 512, imageMaxSlices: 1, batchSize: 768, ubatchSize: 512, imageEvalBatchSize: 512, forceMMProjCPU: false)
+            return RuntimeProfile(imageMaxDimension: CGFloat(settings.gemmaImageMaxDimension), useOriginalImage: settings.gemmaUseOriginalImage, imageMaxSlices: settings.gemmaImageMaxSlices, batchSize: settings.gemmaBatchSize, ubatchSize: settings.gemmaUbatchSize, imageEvalBatchSize: settings.gemmaImageEvalBatchSize, forceMMProjCPU: settings.gemmaForceMMProjCPU)
         }
 
         if model?.metadata.category == .vlm {
-            return RuntimeProfile(imageMaxDimension: 512, imageMaxSlices: 1, batchSize: 512, ubatchSize: 512, imageEvalBatchSize: 512, forceMMProjCPU: false)
+            return RuntimeProfile(imageMaxDimension: CGFloat(settings.genericVLMImageMaxDimension), useOriginalImage: settings.genericVLMUseOriginalImage, imageMaxSlices: settings.genericVLMImageMaxSlices, batchSize: settings.genericVLMBatchSize, ubatchSize: settings.genericVLMUbatchSize, imageEvalBatchSize: settings.genericVLMImageEvalBatchSize, forceMMProjCPU: settings.genericVLMForceMMProjCPU)
         }
 
-        return RuntimeProfile(imageMaxDimension: 768, imageMaxSlices: 1, batchSize: 768, ubatchSize: 768, imageEvalBatchSize: 768, forceMMProjCPU: false)
+        return RuntimeProfile(imageMaxDimension: 768, useOriginalImage: false, imageMaxSlices: 1, batchSize: 768, ubatchSize: 768, imageEvalBatchSize: 768, forceMMProjCPU: false)
     }
 
 }
@@ -823,17 +944,13 @@ actor LLMEngine {
             let operationID = UUID()
             lifecycleOperationID = operationID
             let memoryBeforeUnload = MemoryProbe.snapshot()
-            let didUnloadContext = await unloadCurrentContext()
+            _ = await unloadCurrentContext()
             try Task.checkCancellation()
             guard lifecycleOperationID == operationID else { throw CancellationError() }
-            if didUnloadContext {
-                await MemoryProbe.waitForRelease(after: memoryBeforeUnload, reason: "engine reload")
-                try Task.checkCancellation()
-                guard lifecycleOperationID == operationID else { throw CancellationError() }
-            }
 
-            let nextContext = try autoreleasepool {
-                try LlamaContext.create_context(
+            let createContext = { () throws -> LlamaContext in
+                try autoreleasepool {
+                    try LlamaContext.create_context(
                     path: path,
                     contextLength: contextLength,
                     temperature: temperature,
@@ -850,7 +967,19 @@ actor LLMEngine {
                     ubatchSize: ubatchSize,
                     imageEvalBatchSize: imageEvalBatchSize,
                     forceMMProjCPU: forceMMProjCPU
-                )
+                    )
+                }
+            }
+
+            let nextContext: LlamaContext
+            do {
+                nextContext = try createContext()
+            } catch let error as LlamaError where Self.shouldRetryLoad(after: error) {
+                print("Initial model load failed after context close (\(error)). Waiting briefly and retrying once.")
+                await MemoryProbe.waitForRelease(after: memoryBeforeUnload, reason: "load retry")
+                try Task.checkCancellation()
+                guard lifecycleOperationID == operationID else { throw CancellationError() }
+                nextContext = try createContext()
             }
             try Task.checkCancellation()
             guard lifecycleOperationID == operationID else { throw CancellationError() }
@@ -900,6 +1029,15 @@ actor LLMEngine {
             loadedPresencePenalty = presencePenalty
             loadedFrequencyPenalty = frequencyPenalty
             loadedSeed = seed
+        }
+    }
+
+    static func shouldRetryLoad(after error: LlamaError) -> Bool {
+        switch error {
+        case .modelLoadFailed, .couldNotInitializeContext, .mtmdInitFailed:
+            return true
+        default:
+            return false
         }
     }
 
@@ -972,8 +1110,28 @@ actor LLMEngine {
             )
         } catch {
             await ctx.clear()
+            if imageURL != nil, Self.isMemoryOverflowLike(error) {
+                throw LlamaError.memoryOverflow
+            }
             throw error
         }
+    }
+
+    private static func isMemoryOverflowLike(_ error: Error) -> Bool {
+        if let llamaError = error as? LlamaError {
+            return llamaError.isMemoryOverflowLike
+        }
+
+        let nsError = error as NSError
+        let description = ([nsError.localizedDescription, nsError.localizedFailureReason, nsError.localizedRecoverySuggestion].compactMap { $0 } + nsError.userInfo.values.compactMap { $0 as? String })
+            .joined(separator: " ")
+            .lowercased()
+        return description.contains("out of memory")
+            || description.contains("oom")
+            || description.contains("cannot allocate memory")
+            || description.contains("failed to allocate")
+            || description.contains("posix_memalign failed")
+            || description.contains("metal") && description.contains("memory")
     }
 
     private static func consumeStopsIfPresent(_ pending: inout String, stopSequences: [String]) -> (String, Bool)? {
@@ -1066,6 +1224,17 @@ actor LLMEngine {
         if contextCloseTaskID == closeID {
             contextCloseTask = nil
             contextCloseTaskID = nil
+        }
+    }
+}
+
+private extension LlamaError {
+    var isMemoryOverflowLike: Bool {
+        switch self {
+        case .memoryOverflow, .mtmdTokenizeFailed, .mtmdEvalFailed, .couldNotInitializeContext:
+            return true
+        default:
+            return false
         }
     }
 }

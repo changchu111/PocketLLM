@@ -379,7 +379,7 @@ private struct ModelFamilyRow: View {
     }
 }
 
-private struct CatalogDivider: View {
+struct CatalogDivider: View {
     let horizontalInset: CGFloat
 
     var body: some View {
@@ -415,7 +415,7 @@ private struct CategoryTabBar: View {
     }
 }
 
-private struct RemoteAvatar: View {
+struct RemoteAvatar: View {
     let organization: ModelDescriptor.Organization
     let size: CGFloat
 
@@ -604,7 +604,7 @@ private extension ModelDescriptor {
     }
 }
 
-private struct ModelMetadataLine: View {
+struct ModelMetadataLine: View {
     let model: ModelDescriptor
 
     var body: some View {

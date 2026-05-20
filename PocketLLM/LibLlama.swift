@@ -13,6 +13,7 @@ enum LlamaError: Error {
     case promptTooLong(promptTokens: Int32, contextLength: Int32)
     case visionNotAvailable
     case imageLoadFailed
+    case memoryOverflow
     case mtmdInitFailed
     case mtmdTokenizeFailed(Int32)
     case mtmdEvalFailed(Int32)
@@ -33,6 +34,8 @@ extension LlamaError: LocalizedError {
             return "Vision is not available. Select an mmproj model and try again."
         case .imageLoadFailed:
             return "Failed to load the selected image."
+        case .memoryOverflow:
+            return "内存溢出，请尝试调整图片分辨率设置"
         case .mtmdInitFailed:
             return "Failed to initialize multimodal context (mmproj)."
         case .mtmdTokenizeFailed(let code):
