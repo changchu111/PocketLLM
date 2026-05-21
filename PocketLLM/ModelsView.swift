@@ -363,6 +363,8 @@ private struct ModelFamilyRow: View {
                     Text("\(family.variants.count) 个量化版本 · 参数 \(family.representative.metadata.parameterCount) · \(family.representative.metadata.releaseMonth) 发布")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                 }
                 Spacer()
                 Image(systemName: "chevron.right")
@@ -597,7 +599,7 @@ private struct DownloadModelRow: View {
 private extension ModelDescriptor {
     var familyDisplayName: String {
         name.replacingOccurrences(
-            of: #"\s*\((Q\d(?:_[A-Z0-9]+)*|F16)\)$"#,
+            of: #"\s*\((Q\d(?:_[A-Z0-9]+)*|BF16|F16)\)$"#,
             with: "",
             options: .regularExpression
         )

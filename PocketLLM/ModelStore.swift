@@ -124,7 +124,8 @@ extension String {
             "(Q5_1)": "(5bit)",
             "(Q6_K)": "(6bit)",
             "(Q8_0)": "(8bit)",
-            "(F16)": "(16bit)"
+            "(F16)": "(16bit)",
+            "(BF16)": "(16bit)"
         ]
 
         for (source, replacement) in replacements {
@@ -579,13 +580,77 @@ final class ModelStore: ObservableObject {
     }
 
     private func loadCatalog() {
-        let qwenVLMMetadata = ModelDescriptor.Metadata(
+        let qwenVLMQ4Metadata = ModelDescriptor.Metadata(
             category: .vlm,
             organization: .qwen,
             parameterCount: "2B",
             modelSize: "约 1.5 GB",
             releaseMonth: "2026-01",
             description: "Qwen vision-language GGUF with projector dependency"
+        )
+        let qwenVLMQ8Metadata = ModelDescriptor.Metadata(
+            category: .vlm,
+            organization: .qwen,
+            parameterCount: "2B",
+            modelSize: "约 2.01 GB",
+            releaseMonth: "2026-01",
+            description: "Qwen vision-language GGUF with projector dependency"
+        )
+        let qwenVLMBF16Metadata = ModelDescriptor.Metadata(
+            category: .vlm,
+            organization: .qwen,
+            parameterCount: "2B",
+            modelSize: "约 3.78 GB",
+            releaseMonth: "2026-01",
+            description: "Qwen vision-language GGUF with projector dependency"
+        )
+        let qwen08BVLMQ4Metadata = ModelDescriptor.Metadata(
+            category: .vlm,
+            organization: .qwen,
+            parameterCount: "0.8B",
+            modelSize: "约 535 MB",
+            releaseMonth: "2026-05",
+            description: "Qwen3.5 0.8B compact vision-language GGUF with projector dependency"
+        )
+        let qwen08BVLMQ8Metadata = ModelDescriptor.Metadata(
+            category: .vlm,
+            organization: .qwen,
+            parameterCount: "0.8B",
+            modelSize: "约 812 MB",
+            releaseMonth: "2026-05",
+            description: "Qwen3.5 0.8B compact vision-language GGUF with projector dependency"
+        )
+        let qwen08BVLMBF16Metadata = ModelDescriptor.Metadata(
+            category: .vlm,
+            organization: .qwen,
+            parameterCount: "0.8B",
+            modelSize: "约 1.52 GB",
+            releaseMonth: "2026-05",
+            description: "Qwen3.5 0.8B compact vision-language GGUF with projector dependency"
+        )
+        let qwen4BVLMQ4Metadata = ModelDescriptor.Metadata(
+            category: .vlm,
+            organization: .qwen,
+            parameterCount: "4B",
+            modelSize: "约 2.74 GB",
+            releaseMonth: "2026-03",
+            description: "Qwen3.5 4B vision-language GGUF with projector dependency"
+        )
+        let qwen4BVLMQ8Metadata = ModelDescriptor.Metadata(
+            category: .vlm,
+            organization: .qwen,
+            parameterCount: "4B",
+            modelSize: "约 4.48 GB",
+            releaseMonth: "2026-03",
+            description: "Qwen3.5 4B vision-language GGUF with projector dependency"
+        )
+        let qwen4BVLMBF16Metadata = ModelDescriptor.Metadata(
+            category: .vlm,
+            organization: .qwen,
+            parameterCount: "4B",
+            modelSize: "约 8.42 GB",
+            releaseMonth: "2026-03",
+            description: "Qwen3.5 4B vision-language GGUF with projector dependency"
         )
         let gemma4E2BMetadata = ModelDescriptor.Metadata(
             category: .vlm,
@@ -611,11 +676,43 @@ final class ModelStore: ObservableObject {
             releaseMonth: "2026-03",
             description: "Liquid AI LFM 2.5 compact GGUF text model"
         )
+        let lfm25_350MQ8Metadata = ModelDescriptor.Metadata(
+            category: .llm,
+            organization: .liquidAI,
+            parameterCount: "350M",
+            modelSize: "约 379 MB",
+            releaseMonth: "2026-03",
+            description: "Liquid AI LFM 2.5 compact GGUF text model"
+        )
+        let lfm25_350M16Metadata = ModelDescriptor.Metadata(
+            category: .llm,
+            organization: .liquidAI,
+            parameterCount: "350M",
+            modelSize: "约 711 MB",
+            releaseMonth: "2026-03",
+            description: "Liquid AI LFM 2.5 compact GGUF text model"
+        )
         let lfm25_12BMetadata = ModelDescriptor.Metadata(
             category: .llm,
             organization: .liquidAI,
             parameterCount: "1.2B",
             modelSize: "约 731 MB",
+            releaseMonth: "2026-01",
+            description: "Liquid AI LFM 2.5 Instruct GGUF text model"
+        )
+        let lfm25_12BQ8Metadata = ModelDescriptor.Metadata(
+            category: .llm,
+            organization: .liquidAI,
+            parameterCount: "1.2B",
+            modelSize: "约 1.25 GB",
+            releaseMonth: "2026-01",
+            description: "Liquid AI LFM 2.5 Instruct GGUF text model"
+        )
+        let lfm25_12B16Metadata = ModelDescriptor.Metadata(
+            category: .llm,
+            organization: .liquidAI,
+            parameterCount: "1.2B",
+            modelSize: "约 2.34 GB",
             releaseMonth: "2026-01",
             description: "Liquid AI LFM 2.5 Instruct GGUF text model"
         )
@@ -627,6 +724,22 @@ final class ModelStore: ObservableObject {
             releaseMonth: "2026-01",
             description: "Liquid AI LFM 2.5 on-device reasoning GGUF text model"
         )
+        let lfm25_12BThinkingQ8Metadata = ModelDescriptor.Metadata(
+            category: .llm,
+            organization: .liquidAI,
+            parameterCount: "1.2B",
+            modelSize: "约 1.25 GB",
+            releaseMonth: "2026-01",
+            description: "Liquid AI LFM 2.5 on-device reasoning GGUF text model"
+        )
+        let lfm25_12BThinking16Metadata = ModelDescriptor.Metadata(
+            category: .llm,
+            organization: .liquidAI,
+            parameterCount: "1.2B",
+            modelSize: "约 2.34 GB",
+            releaseMonth: "2026-01",
+            description: "Liquid AI LFM 2.5 on-device reasoning GGUF text model"
+        )
         let lfm25VL450MMetadata = ModelDescriptor.Metadata(
             category: .vlm,
             organization: .liquidAI,
@@ -635,11 +748,43 @@ final class ModelStore: ObservableObject {
             releaseMonth: "2026-04",
             description: "Liquid AI LFM 2.5 VL GGUF vision-language model"
         )
+        let lfm25VL450MQ8Metadata = ModelDescriptor.Metadata(
+            category: .vlm,
+            organization: .liquidAI,
+            parameterCount: "450M",
+            modelSize: "约 379 MB",
+            releaseMonth: "2026-04",
+            description: "Liquid AI LFM 2.5 VL GGUF vision-language model"
+        )
+        let lfm25VL450M16Metadata = ModelDescriptor.Metadata(
+            category: .vlm,
+            organization: .liquidAI,
+            parameterCount: "450M",
+            modelSize: "约 711 MB",
+            releaseMonth: "2026-04",
+            description: "Liquid AI LFM 2.5 VL GGUF vision-language model"
+        )
         let lfm25VL16BMetadata = ModelDescriptor.Metadata(
             category: .vlm,
             organization: .liquidAI,
             parameterCount: "1.6B",
             modelSize: "约 696 MB",
+            releaseMonth: "2026-01",
+            description: "Liquid AI LFM 2.5 VL GGUF vision-language model"
+        )
+        let lfm25VL16BQ8Metadata = ModelDescriptor.Metadata(
+            category: .vlm,
+            organization: .liquidAI,
+            parameterCount: "1.6B",
+            modelSize: "约 1.25 GB",
+            releaseMonth: "2026-01",
+            description: "Liquid AI LFM 2.5 VL GGUF vision-language model"
+        )
+        let lfm25VL16B16Metadata = ModelDescriptor.Metadata(
+            category: .vlm,
+            organization: .liquidAI,
+            parameterCount: "1.6B",
+            modelSize: "约 2.34 GB",
             releaseMonth: "2026-01",
             description: "Liquid AI LFM 2.5 VL GGUF vision-language model"
         )
@@ -670,8 +815,8 @@ final class ModelStore: ObservableObject {
         let miniCPMV45Metadata = ModelDescriptor.Metadata(
             category: .vlm,
             organization: .openBMB,
-            parameterCount: "8B",
-            modelSize: "约 4.8 GB",
+            parameterCount: "8.7B",
+            modelSize: "约 5.03 GB",
             releaseMonth: "2025-08",
             description: "MiniCPM-V 4.5 multimodal GGUF model"
         )
@@ -686,8 +831,8 @@ final class ModelStore: ObservableObject {
         let miniCPMV4Metadata = ModelDescriptor.Metadata(
             category: .vlm,
             organization: .openBMB,
-            parameterCount: "8B",
-            modelSize: "约 4.8 GB",
+            parameterCount: "4.1B",
+            modelSize: "约 2.19 GB",
             releaseMonth: "2025-06",
             description: "MiniCPM-V 4.0 multimodal GGUF model"
         )
@@ -707,7 +852,25 @@ final class ModelStore: ObservableObject {
             filename: "Qwen3.5-2B-Q4_K_M.gguf",
             pairedMMProjID: "mmproj-F16.gguf",
             source: .remote(url: URL(string: "https://hf-mirror.com/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf")!),
-            metadata: qwenVLMMetadata
+            metadata: qwenVLMQ4Metadata
+        )
+
+        let qwenQ8 = ModelDescriptor(
+            id: "Qwen3.5-2B-Q8_0.gguf",
+            name: "Qwen3.5-2B (Q8_0)",
+            filename: "Qwen3.5-2B-Q8_0.gguf",
+            pairedMMProjID: "mmproj-F16.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q8_0.gguf")!),
+            metadata: qwenVLMQ8Metadata
+        )
+
+        let qwenBF16 = ModelDescriptor(
+            id: "Qwen3.5-2B-BF16.gguf",
+            name: "Qwen3.5-2B (BF16)",
+            filename: "Qwen3.5-2B-BF16.gguf",
+            pairedMMProjID: "mmproj-F16.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-BF16.gguf")!),
+            metadata: qwenVLMBF16Metadata
         )
 
         let qwenMMProj = ModelDescriptor(
@@ -716,7 +879,79 @@ final class ModelStore: ObservableObject {
             filename: "mmproj-F16.gguf",
             kind: .mmproj,
             source: .remote(url: URL(string: "https://hf-mirror.com/unsloth/Qwen3.5-2B-GGUF/resolve/main/mmproj-F16.gguf")!),
-            metadata: qwenVLMMetadata
+            metadata: qwenVLMQ4Metadata
+        )
+
+        let qwen08BQ4 = ModelDescriptor(
+            id: "Qwen3.5-0.8B-Q4_K_M.gguf",
+            name: "Qwen3.5-0.8B (Q4_K_M)",
+            filename: "Qwen3.5-0.8B-Q4_K_M.gguf",
+            pairedMMProjID: "Qwen3.5-0.8B-mmproj-F16.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf")!),
+            metadata: qwen08BVLMQ4Metadata
+        )
+
+        let qwen08BQ8 = ModelDescriptor(
+            id: "Qwen3.5-0.8B-Q8_0.gguf",
+            name: "Qwen3.5-0.8B (Q8_0)",
+            filename: "Qwen3.5-0.8B-Q8_0.gguf",
+            pairedMMProjID: "Qwen3.5-0.8B-mmproj-F16.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q8_0.gguf")!),
+            metadata: qwen08BVLMQ8Metadata
+        )
+
+        let qwen08BBF16 = ModelDescriptor(
+            id: "Qwen3.5-0.8B-BF16.gguf",
+            name: "Qwen3.5-0.8B (BF16)",
+            filename: "Qwen3.5-0.8B-BF16.gguf",
+            pairedMMProjID: "Qwen3.5-0.8B-mmproj-F16.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-BF16.gguf")!),
+            metadata: qwen08BVLMBF16Metadata
+        )
+
+        let qwen08BMMProj = ModelDescriptor(
+            id: "Qwen3.5-0.8B-mmproj-F16.gguf",
+            name: "Qwen3.5-0.8B mmproj (F16)",
+            filename: "Qwen3.5-0.8B-mmproj-F16.gguf",
+            kind: .mmproj,
+            source: .remote(url: URL(string: "https://hf-mirror.com/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/mmproj-F16.gguf")!),
+            metadata: qwen08BVLMQ4Metadata
+        )
+
+        let qwen4BQ4 = ModelDescriptor(
+            id: "Qwen3.5-4B-Q4_K_M.gguf",
+            name: "Qwen3.5-4B (Q4_K_M)",
+            filename: "Qwen3.5-4B-Q4_K_M.gguf",
+            pairedMMProjID: "Qwen3.5-4B-mmproj-F16.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf")!),
+            metadata: qwen4BVLMQ4Metadata
+        )
+
+        let qwen4BQ8 = ModelDescriptor(
+            id: "Qwen3.5-4B-Q8_0.gguf",
+            name: "Qwen3.5-4B (Q8_0)",
+            filename: "Qwen3.5-4B-Q8_0.gguf",
+            pairedMMProjID: "Qwen3.5-4B-mmproj-F16.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q8_0.gguf")!),
+            metadata: qwen4BVLMQ8Metadata
+        )
+
+        let qwen4BBF16 = ModelDescriptor(
+            id: "Qwen3.5-4B-BF16.gguf",
+            name: "Qwen3.5-4B (BF16)",
+            filename: "Qwen3.5-4B-BF16.gguf",
+            pairedMMProjID: "Qwen3.5-4B-mmproj-F16.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-BF16.gguf")!),
+            metadata: qwen4BVLMBF16Metadata
+        )
+
+        let qwen4BMMProj = ModelDescriptor(
+            id: "Qwen3.5-4B-mmproj-F16.gguf",
+            name: "Qwen3.5-4B mmproj (F16)",
+            filename: "Qwen3.5-4B-mmproj-F16.gguf",
+            kind: .mmproj,
+            source: .remote(url: URL(string: "https://hf-mirror.com/unsloth/Qwen3.5-4B-GGUF/resolve/main/mmproj-F16.gguf")!),
+            metadata: qwen4BVLMQ4Metadata
         )
 
         let gemma4E2B = ModelDescriptor(
@@ -763,6 +998,22 @@ final class ModelStore: ObservableObject {
             metadata: lfm25_350MMetadata
         )
 
+        let lfm25_350MQ8 = ModelDescriptor(
+            id: "LFM2.5-350M-Q8_0.gguf",
+            name: "LFM2.5-350M (Q8_0)",
+            filename: "LFM2.5-350M-Q8_0.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/LiquidAI/LFM2.5-350M-GGUF/resolve/main/LFM2.5-350M-Q8_0.gguf")!),
+            metadata: lfm25_350MQ8Metadata
+        )
+
+        let lfm25_350M16 = ModelDescriptor(
+            id: "LFM2.5-350M-BF16.gguf",
+            name: "LFM2.5-350M (BF16)",
+            filename: "LFM2.5-350M-BF16.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/LiquidAI/LFM2.5-350M-GGUF/resolve/main/LFM2.5-350M-BF16.gguf")!),
+            metadata: lfm25_350M16Metadata
+        )
+
         let lfm25_12B = ModelDescriptor(
             id: "LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
             name: "LFM2.5-1.2B-Instruct (Q4_K_M)",
@@ -771,12 +1022,44 @@ final class ModelStore: ObservableObject {
             metadata: lfm25_12BMetadata
         )
 
+        let lfm25_12BQ8 = ModelDescriptor(
+            id: "LFM2.5-1.2B-Instruct-Q8_0.gguf",
+            name: "LFM2.5-1.2B-Instruct (Q8_0)",
+            filename: "LFM2.5-1.2B-Instruct-Q8_0.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/LiquidAI/LFM2.5-1.2B-Instruct-GGUF/resolve/main/LFM2.5-1.2B-Instruct-Q8_0.gguf")!),
+            metadata: lfm25_12BQ8Metadata
+        )
+
+        let lfm25_12B16 = ModelDescriptor(
+            id: "LFM2.5-1.2B-Instruct-BF16.gguf",
+            name: "LFM2.5-1.2B-Instruct (BF16)",
+            filename: "LFM2.5-1.2B-Instruct-BF16.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/LiquidAI/LFM2.5-1.2B-Instruct-GGUF/resolve/main/LFM2.5-1.2B-Instruct-BF16.gguf")!),
+            metadata: lfm25_12B16Metadata
+        )
+
         let lfm25_12BThinking = ModelDescriptor(
             id: "LFM2.5-1.2B-Thinking-Q4_K_M.gguf",
             name: "LFM2.5-1.2B-Thinking (Q4_K_M)",
             filename: "LFM2.5-1.2B-Thinking-Q4_K_M.gguf",
             source: .remote(url: URL(string: "https://hf-mirror.com/LiquidAI/LFM2.5-1.2B-Thinking-GGUF/resolve/main/LFM2.5-1.2B-Thinking-Q4_K_M.gguf")!),
             metadata: lfm25_12BThinkingMetadata
+        )
+
+        let lfm25_12BThinkingQ8 = ModelDescriptor(
+            id: "LFM2.5-1.2B-Thinking-Q8_0.gguf",
+            name: "LFM2.5-1.2B-Thinking (Q8_0)",
+            filename: "LFM2.5-1.2B-Thinking-Q8_0.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/LiquidAI/LFM2.5-1.2B-Thinking-GGUF/resolve/main/LFM2.5-1.2B-Thinking-Q8_0.gguf")!),
+            metadata: lfm25_12BThinkingQ8Metadata
+        )
+
+        let lfm25_12BThinking16 = ModelDescriptor(
+            id: "LFM2.5-1.2B-Thinking-BF16.gguf",
+            name: "LFM2.5-1.2B-Thinking (BF16)",
+            filename: "LFM2.5-1.2B-Thinking-BF16.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/LiquidAI/LFM2.5-1.2B-Thinking-GGUF/resolve/main/LFM2.5-1.2B-Thinking-BF16.gguf")!),
+            metadata: lfm25_12BThinking16Metadata
         )
 
         let lfm25VL450M = ModelDescriptor(
@@ -788,6 +1071,24 @@ final class ModelStore: ObservableObject {
             metadata: lfm25VL450MMetadata
         )
 
+        let lfm25VL450MQ8 = ModelDescriptor(
+            id: "LFM2.5-VL-450M-Q8_0.gguf",
+            name: "LFM2.5‑VL-450M (Q8_0)",
+            filename: "LFM2.5-VL-450M-Q8_0.gguf",
+            pairedMMProjID: "mmproj-LFM2.5-VL-450m-Q8_0.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/LiquidAI/LFM2.5-VL-450M-GGUF/resolve/main/LFM2.5-VL-450M-Q8_0.gguf")!),
+            metadata: lfm25VL450MQ8Metadata
+        )
+
+        let lfm25VL450M16 = ModelDescriptor(
+            id: "LFM2.5-VL-450M-F16.gguf",
+            name: "LFM2.5‑VL-450M (F16)",
+            filename: "LFM2.5-VL-450M-F16.gguf",
+            pairedMMProjID: "mmproj-LFM2.5-VL-450m-F16.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/LiquidAI/LFM2.5-VL-450M-GGUF/resolve/main/LFM2.5-VL-450M-F16.gguf")!),
+            metadata: lfm25VL450M16Metadata
+        )
+
         let lfm25VL450MMMProj = ModelDescriptor(
             id: "mmproj-LFM2.5-VL-450m-Q8_0.gguf",
             name: "LFM2.5‑VL-450M mmproj (Q8_0)",
@@ -795,6 +1096,15 @@ final class ModelStore: ObservableObject {
             kind: .mmproj,
             source: .remote(url: URL(string: "https://hf-mirror.com/LiquidAI/LFM2.5-VL-450M-GGUF/resolve/main/mmproj-LFM2.5-VL-450m-Q8_0.gguf")!),
             metadata: lfm25VL450MMetadata
+        )
+
+        let lfm25VL450MMMProj16 = ModelDescriptor(
+            id: "mmproj-LFM2.5-VL-450m-F16.gguf",
+            name: "LFM2.5‑VL-450M mmproj (F16)",
+            filename: "mmproj-LFM2.5-VL-450m-F16.gguf",
+            kind: .mmproj,
+            source: .remote(url: URL(string: "https://hf-mirror.com/LiquidAI/LFM2.5-VL-450M-GGUF/resolve/main/mmproj-LFM2.5-VL-450m-F16.gguf")!),
+            metadata: lfm25VL450M16Metadata
         )
 
         let lfm25VL16B = ModelDescriptor(
@@ -806,6 +1116,24 @@ final class ModelStore: ObservableObject {
             metadata: lfm25VL16BMetadata
         )
 
+        let lfm25VL16BQ8 = ModelDescriptor(
+            id: "LFM2.5-VL-1.6B-Q8_0.gguf",
+            name: "LFM2.5‑VL-1.6B (Q8_0)",
+            filename: "LFM2.5-VL-1.6B-Q8_0.gguf",
+            pairedMMProjID: "mmproj-LFM2.5-VL-1.6b-Q8_0.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/LiquidAI/LFM2.5-VL-1.6B-GGUF/resolve/main/LFM2.5-VL-1.6B-Q8_0.gguf")!),
+            metadata: lfm25VL16BQ8Metadata
+        )
+
+        let lfm25VL16B16 = ModelDescriptor(
+            id: "LFM2.5-VL-1.6B-BF16.gguf",
+            name: "LFM2.5‑VL-1.6B (BF16)",
+            filename: "LFM2.5-VL-1.6B-BF16.gguf",
+            pairedMMProjID: "mmproj-LFM2.5-VL-1.6b-BF16.gguf",
+            source: .remote(url: URL(string: "https://hf-mirror.com/LiquidAI/LFM2.5-VL-1.6B-GGUF/resolve/main/LFM2.5-VL-1.6B-BF16.gguf")!),
+            metadata: lfm25VL16B16Metadata
+        )
+
         let lfm25VL16BMMProj = ModelDescriptor(
             id: "mmproj-LFM2.5-VL-1.6b-Q8_0.gguf",
             name: "LFM2.5‑VL-1.6B mmproj (Q8_0)",
@@ -813,6 +1141,15 @@ final class ModelStore: ObservableObject {
             kind: .mmproj,
             source: .remote(url: URL(string: "https://hf-mirror.com/LiquidAI/LFM2.5-VL-1.6B-GGUF/resolve/main/mmproj-LFM2.5-VL-1.6b-Q8_0.gguf")!),
             metadata: lfm25VL16BMetadata
+        )
+
+        let lfm25VL16BMMProj16 = ModelDescriptor(
+            id: "mmproj-LFM2.5-VL-1.6b-BF16.gguf",
+            name: "LFM2.5‑VL-1.6B mmproj (BF16)",
+            filename: "mmproj-LFM2.5-VL-1.6b-BF16.gguf",
+            kind: .mmproj,
+            source: .remote(url: URL(string: "https://hf-mirror.com/LiquidAI/LFM2.5-VL-1.6B-GGUF/resolve/main/mmproj-LFM2.5-VL-1.6b-BF16.gguf")!),
+            metadata: lfm25VL16B16Metadata
         )
 
         let miniCPM46 = ModelDescriptor(
@@ -904,7 +1241,7 @@ final class ModelStore: ObservableObject {
             metadata: privacyMetadata
         )
 
-        catalog = [qwen, qwenMMProj, gemma4E2B, gemma4E2BMMProj, gemma4E4B, gemma4E4BMMProj, lfm25_350M, lfm25_12B, lfm25_12BThinking, lfm25VL450M, lfm25VL450MMMProj, lfm25VL16B, lfm25VL16BMMProj, miniCPM46, miniCPM46Q8, miniCPM46F16, miniCPM46MMProj, miniCPM, miniCPM41, miniCPMV4, miniCPMV4MMProj, miniCPMMMProj, privacyFilter]
+        catalog = [qwen, qwenQ8, qwenBF16, qwenMMProj, qwen08BQ4, qwen08BQ8, qwen08BBF16, qwen08BMMProj, qwen4BQ4, qwen4BQ8, qwen4BBF16, qwen4BMMProj, gemma4E2B, gemma4E2BMMProj, gemma4E4B, gemma4E4BMMProj, lfm25_350M, lfm25_350MQ8, lfm25_350M16, lfm25_12B, lfm25_12BQ8, lfm25_12B16, lfm25_12BThinking, lfm25_12BThinkingQ8, lfm25_12BThinking16, lfm25VL450M, lfm25VL450MQ8, lfm25VL450M16, lfm25VL450MMMProj, lfm25VL450MMMProj16, lfm25VL16B, lfm25VL16BQ8, lfm25VL16B16, lfm25VL16BMMProj, lfm25VL16BMMProj16, miniCPM46, miniCPM46Q8, miniCPM46F16, miniCPM46MMProj, miniCPM, miniCPM41, miniCPMV4, miniCPMV4MMProj, miniCPMMMProj, privacyFilter]
     }
 
 }
