@@ -15,6 +15,7 @@ struct VLMRuntimeSettings {
 final class GenerationSettings: ObservableObject {
     @Published var contextLength: Int32 = 4096
     @Published var maxNewTokens: Int32 = 512
+    @Published var unlimitedMaxNewTokens: Bool = false
 
     @Published var temperature: Float = 0.7
     @Published var topK: Int32 = 40
@@ -27,12 +28,14 @@ final class GenerationSettings: ObservableObject {
 
     @Published var miniCPMV46ImageSlices: Int32 = 9
     @Published var miniCPMV46MaxNewTokens: Int32 = 512
+    @Published var miniCPMV46UnlimitedMaxNewTokens: Bool = false
     @Published var miniCPMV46Temperature: Float = 0.7
     @Published var miniCPMV46TopK: Int32 = 100
     @Published var miniCPMV46TopP: Float = 0.8
     @Published var miniCPMV46RepeatPenalty: Float = 1.05
 
     @Published var gemmaMaxNewTokens: Int32 = 4000
+    @Published var gemmaUnlimitedMaxNewTokens: Bool = false
     @Published var gemmaTemperature: Float = 1.0
     @Published var gemmaTopK: Int32 = 64
     @Published var gemmaTopP: Float = 0.95

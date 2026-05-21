@@ -229,51 +229,63 @@ private struct ChatModelSelector: View {
     @State private var showingPicker = false
 
     var body: some View {
-        VStack(spacing: 8) {
-            Button {
-                withAnimation(.easeOut(duration: 0.16)) {
-                    showingPicker.toggle()
-                }
-            } label: {
-                HStack(spacing: 8) {
-                    Image(systemName: "cpu")
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("当前模型")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        Text(viewModel.activeModelName)
-                            .font(.subheadline.weight(.semibold))
-                            .lineLimit(1)
-                    }
-                    Spacer()
-                    Image(systemName: "chevron.down")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                        .rotationEffect(.degrees(showingPicker ? 180 : 0))
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-                .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        currentModelButton
+            .overlay(alignment: .bottom) {
+                pickerOverlay
+                    .alignmentGuide(.bottom) { dimensions in dimensions[.top] }
+                    .offset(y: 8)
             }
-            .buttonStyle(.plain)
+            .zIndex(10)
+    }
 
-            if showingPicker {
-                ChatModelPicker(
-                    viewModel: viewModel,
-                    onSelect: { model in
-                        viewModel.selectModel(model)
-                        withAnimation(.easeOut(duration: 0.16)) {
-                            showingPicker = false
-                        }
-                    },
-                    onMoreModels: {
+    @ViewBuilder
+    private var pickerOverlay: some View {
+        if showingPicker {
+            ChatModelPicker(
+                viewModel: viewModel,
+                onSelect: { model in
+                    viewModel.selectModel(model)
+                    withAnimation(.easeOut(duration: 0.16)) {
                         showingPicker = false
-                        appModel.selectedTab = .models
                     }
-                )
-                .transition(.opacity.combined(with: .move(edge: .top)))
-            }
+                },
+                onMoreModels: {
+                    showingPicker = false
+                    appModel.selectedTab = .models
+                }
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .transition(.opacity.combined(with: .scale(scale: 0.02, anchor: .top)))
         }
+    }
+
+    private var currentModelButton: some View {
+        Button {
+            withAnimation(.easeOut(duration: 0.16)) {
+                showingPicker.toggle()
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "cpu")
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("当前模型")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text(viewModel.activeModelName)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                }
+                Spacer()
+                Image(systemName: "chevron.down")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(showingPicker ? 180 : 0))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -452,6 +464,7 @@ private struct ModelSettingsSheet: View {
     let onDismiss: () -> Void
 
     @State private var maxTokens: Double
+    @State private var unlimitedMaxTokens: Bool
     @State private var contextLength: Double
     @State private var topK: Double
     @State private var topP: Double
@@ -483,6 +496,7 @@ private struct ModelSettingsSheet: View {
         self.viewModel = viewModel
         self.onDismiss = onDismiss
         _maxTokens = State(initialValue: Double(viewModel.activeModelIsGemma4 ? viewModel.gemmaMaxNewTokens : (viewModel.activeModelIsMiniCPMV46 ? viewModel.miniCPMV46MaxNewTokens : viewModel.maxNewTokens)))
+        _unlimitedMaxTokens = State(initialValue: viewModel.activeModelIsGemma4 ? viewModel.gemmaUnlimitedMaxNewTokens : (viewModel.activeModelIsMiniCPMV46 ? viewModel.miniCPMV46UnlimitedMaxNewTokens : viewModel.unlimitedMaxNewTokens))
         _contextLength = State(initialValue: Double(viewModel.contextLength))
         _topK = State(initialValue: Double(viewModel.activeModelIsGemma4 ? viewModel.gemmaTopK : (viewModel.activeModelIsMiniCPMV46 ? viewModel.miniCPMV46TopK : viewModel.topK)))
         _topP = State(initialValue: Double(viewModel.activeModelIsGemma4 ? viewModel.gemmaTopP : (viewModel.activeModelIsMiniCPMV46 ? viewModel.miniCPMV46TopP : viewModel.topP)))
@@ -530,7 +544,9 @@ private struct ModelSettingsSheet: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
 
-            ConfigSliderRow(title: "最大 Token 数", value: $maxTokens, range: viewModel.activeModelIsGemma4 ? 16...32000 : 16...4096, integerOnly: true)
+            ConfigToggleRow(title: "不限制最大 Token 数", isOn: $unlimitedMaxTokens)
+
+            ConfigSliderRow(title: "最大 Token 数", value: $maxTokens, range: viewModel.activeModelIsGemma4 ? 16...32000 : 16...4096, integerOnly: true, isEnabled: unlimitedMaxTokens == false)
 
             if viewModel.activeModelIsMiniCPMV46 {
                 ConfigSliderRow(title: "TopK", value: $topK, range: 0...200, integerOnly: true)
@@ -728,6 +744,7 @@ private struct ModelSettingsSheet: View {
         if viewModel.activeModelIsGemma4 {
             viewModel.applyGemmaSettings(
                 maxNewTokens: Int32(Self.clamp(maxTokens, in: 16...32000).rounded()),
+                unlimitedMaxNewTokens: unlimitedMaxTokens,
                 temperature: Float(Self.clamp(temperature, in: 0...2)),
                 topK: Int32(Self.clamp(topK, in: 0...64).rounded()),
                 topP: Float(Self.clamp(topP, in: 0...1)),
@@ -737,10 +754,10 @@ private struct ModelSettingsSheet: View {
             return
         }
 
-        viewModel.maxNewTokens = Int32(Self.clamp(maxTokens, in: 16...4096).rounded())
         if viewModel.activeModelIsMiniCPMV46 {
             viewModel.applyMiniCPMV46Settings(
                 maxNewTokens: Int32(Self.clamp(maxTokens, in: 16...4096).rounded()),
+                unlimitedMaxNewTokens: unlimitedMaxTokens,
                 temperature: Float(Self.clamp(temperature, in: 0...1.5)),
                 topK: Int32(Self.clamp(topK, in: 0...200).rounded()),
                 topP: Float(Self.clamp(topP, in: 0...1)),
@@ -750,6 +767,8 @@ private struct ModelSettingsSheet: View {
             return
         }
 
+        viewModel.maxNewTokens = Int32(Self.clamp(maxTokens, in: 16...4096).rounded())
+        viewModel.unlimitedMaxNewTokens = unlimitedMaxTokens
         viewModel.contextLength = Int32(Self.clamp(contextLength, in: 512...16384).rounded())
         viewModel.temperature = Float(Self.clamp(temperature, in: 0...1.5))
         viewModel.topK = Int32(Self.clamp(topK, in: 0...200).rounded())
@@ -815,6 +834,7 @@ private struct GoogleGemmaConfigurationsView: View {
     let onDismiss: () -> Void
 
     @State private var maxTokens: Double
+    @State private var unlimitedMaxTokens: Bool
     @State private var topK: Double
     @State private var topP: Double
     @State private var temperature: Double
@@ -825,6 +845,7 @@ private struct GoogleGemmaConfigurationsView: View {
         self.viewModel = viewModel
         self.onDismiss = onDismiss
         _maxTokens = State(initialValue: Double(viewModel.gemmaMaxNewTokens))
+        _unlimitedMaxTokens = State(initialValue: viewModel.gemmaUnlimitedMaxNewTokens)
         _topK = State(initialValue: Double(viewModel.gemmaTopK))
         _topP = State(initialValue: Double(viewModel.gemmaTopP))
         _temperature = State(initialValue: Double(viewModel.gemmaTemperature))
@@ -838,7 +859,8 @@ private struct GoogleGemmaConfigurationsView: View {
                     .font(.title2.weight(.semibold))
                     .padding(.bottom, 2)
 
-                ConfigSliderRow(title: "最大 Token 数", value: $maxTokens, range: 16...32000, integerOnly: true)
+                ConfigToggleRow(title: "不限制最大 Token 数", isOn: $unlimitedMaxTokens)
+                ConfigSliderRow(title: "最大 Token 数", value: $maxTokens, range: 16...32000, integerOnly: true, isEnabled: unlimitedMaxTokens == false)
                 ConfigSliderRow(title: "TopK", value: $topK, range: 0...64, integerOnly: true)
                 ConfigSliderRow(title: "TopP", value: $topP, range: 0...1, integerOnly: false)
                 ConfigSliderRow(title: "Temperature", value: $temperature, range: 0...2, integerOnly: false)
@@ -886,6 +908,7 @@ private struct GoogleGemmaConfigurationsView: View {
                     Button {
                         viewModel.applyGemmaSettings(
                             maxNewTokens: Int32(Self.clamp(maxTokens, in: 16...32000).rounded()),
+                            unlimitedMaxNewTokens: unlimitedMaxTokens,
                             temperature: Float(Self.clamp(temperature, in: 0...2)),
                             topK: Int32(Self.clamp(topK, in: 0...64).rounded()),
                             topP: Float(Self.clamp(topP, in: 0...1)),

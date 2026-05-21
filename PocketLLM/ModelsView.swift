@@ -61,15 +61,6 @@ struct ModelsView: View {
             } message: {
                 Text("这会删除该模型未完成的本地文件并释放存储空间，之后可以重新下载。")
             }
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        modelStore.refreshInstalled()
-                    } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                }
-            }
         }
     }
 

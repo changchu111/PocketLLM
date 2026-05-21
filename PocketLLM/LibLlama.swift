@@ -306,7 +306,7 @@ actor LlamaContext {
         is_done = false
         n_decode = 0
 
-        maxNewTokensRemaining = max(0, maxNewTokens)
+        maxNewTokensRemaining = maxNewTokens < 0 ? Int32.max : max(0, maxNewTokens)
 
         // Important for M-RoPE models (e.g. Qwen): positions must be monotonic.
         // Since PocketLLM rebuilds the full prompt each send, clear KV cache here.
@@ -329,7 +329,8 @@ actor LlamaContext {
             throw LlamaError.promptTooLong(promptTokens: promptTokens, contextLength: n_ctx)
         }
 
-        n_len = min(n_ctx, promptTokens + max(1, maxNewTokens))
+        let generationBudget = maxNewTokens < 0 ? n_ctx - promptTokens : max(1, maxNewTokens)
+        n_len = min(n_ctx, promptTokens + generationBudget)
 
         // Ensure our batch arrays can fit the whole prompt.
         ensurePromptBatchCapacity(promptTokens: promptTokens)
@@ -417,13 +418,15 @@ actor LlamaContext {
 
         let n_ctx = Int32(llama_n_ctx(context))
         let remainingContext = n_ctx - n_cur
-        let reservedGenerationTokens = min(max(32, maxNewTokensRemaining / 4), 128)
+        let unlimitedGeneration = maxNewTokensRemaining == Int32.max
+        let reservedGenerationTokens = unlimitedGeneration ? Int32(32) : min(max(32, maxNewTokensRemaining / 4), 128)
         print("mtmd prompt evaluated: n_past=\(n_cur), n_ctx=\(n_ctx), remaining=\(remainingContext), reserved_generation=\(reservedGenerationTokens)")
         if remainingContext <= 1 || remainingContext < reservedGenerationTokens {
             is_done = true
             throw LlamaError.promptTooLong(promptTokens: n_cur, contextLength: n_ctx)
         }
-        n_len = min(n_ctx, n_cur + max(1, maxNewTokensRemaining))
+        let generationBudget = unlimitedGeneration ? n_ctx - n_cur : max(1, maxNewTokensRemaining)
+        n_len = min(n_ctx, n_cur + generationBudget)
         #else
         throw LlamaError.visionNotAvailable
         #endif

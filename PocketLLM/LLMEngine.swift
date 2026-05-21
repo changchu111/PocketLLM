@@ -213,6 +213,11 @@ final class ChatViewModel: ObservableObject {
         set { settings.maxNewTokens = max(16, min(4096, newValue)) }
     }
 
+    var unlimitedMaxNewTokens: Bool {
+        get { settings.unlimitedMaxNewTokens }
+        set { settings.unlimitedMaxNewTokens = newValue }
+    }
+
     var contextLength: Int32 {
         get { settings.contextLength }
         set { settings.contextLength = max(512, min(16384, newValue)) }
@@ -259,13 +264,15 @@ final class ChatViewModel: ObservableObject {
     }
 
     var miniCPMV46MaxNewTokens: Int32 { settings.miniCPMV46MaxNewTokens }
+    var miniCPMV46UnlimitedMaxNewTokens: Bool { settings.miniCPMV46UnlimitedMaxNewTokens }
     var miniCPMV46Temperature: Float { settings.miniCPMV46Temperature }
     var miniCPMV46TopK: Int32 { settings.miniCPMV46TopK }
     var miniCPMV46TopP: Float { settings.miniCPMV46TopP }
     var miniCPMV46RepeatPenalty: Float { settings.miniCPMV46RepeatPenalty }
 
-    func applyMiniCPMV46Settings(maxNewTokens: Int32, temperature: Float, topK: Int32, topP: Float, repeatPenalty: Float, imageSlices: Int32) {
+    func applyMiniCPMV46Settings(maxNewTokens: Int32, unlimitedMaxNewTokens: Bool, temperature: Float, topK: Int32, topP: Float, repeatPenalty: Float, imageSlices: Int32) {
         settings.miniCPMV46MaxNewTokens = max(16, min(4096, maxNewTokens))
+        settings.miniCPMV46UnlimitedMaxNewTokens = unlimitedMaxNewTokens
         settings.miniCPMV46Temperature = max(0.0, min(1.5, temperature))
         settings.miniCPMV46TopK = max(0, min(200, topK))
         settings.miniCPMV46TopP = max(0.0, min(1.0, topP))
@@ -344,14 +351,16 @@ final class ChatViewModel: ObservableObject {
     }
 
     var gemmaMaxNewTokens: Int32 { settings.gemmaMaxNewTokens }
+    var gemmaUnlimitedMaxNewTokens: Bool { settings.gemmaUnlimitedMaxNewTokens }
     var gemmaTemperature: Float { settings.gemmaTemperature }
     var gemmaTopK: Int32 { settings.gemmaTopK }
     var gemmaTopP: Float { settings.gemmaTopP }
     var gemmaUseGPU: Bool { settings.gemmaUseGPU }
     var gemmaThinkingEnabled: Bool { settings.gemmaThinkingEnabled }
 
-    func applyGemmaSettings(maxNewTokens: Int32, temperature: Float, topK: Int32, topP: Float, useGPU: Bool, thinkingEnabled: Bool) {
+    func applyGemmaSettings(maxNewTokens: Int32, unlimitedMaxNewTokens: Bool, temperature: Float, topK: Int32, topP: Float, useGPU: Bool, thinkingEnabled: Bool) {
         settings.gemmaMaxNewTokens = max(16, min(32000, maxNewTokens))
+        settings.gemmaUnlimitedMaxNewTokens = unlimitedMaxNewTokens
         settings.gemmaTemperature = max(0.0, min(2.0, temperature))
         settings.gemmaTopK = max(0, min(64, topK))
         settings.gemmaTopP = max(0.0, min(1.0, topP))
@@ -574,7 +583,7 @@ final class ChatViewModel: ObservableObject {
             maxRecentRounds: 2,
             gemmaThinkingEnabled: isGemma4 && settings.gemmaThinkingEnabled
         )
-                let maxNewTokens = isGemma4 ? settings.gemmaMaxNewTokens : (isMiniCPMV46 ? settings.miniCPMV46MaxNewTokens : settings.maxNewTokens)
+                let maxNewTokens = effectiveMaxNewTokens(isGemma4: isGemma4, isMiniCPMV46: isMiniCPMV46)
                 let metrics = try await engine.generate(prompt: prompt, imageURL: imageURL, maxNewTokens: maxNewTokens, requestStartedAt: requestStartedAt) { token in
                     if let idx = self.messages.firstIndex(where: { $0.id == assistantID }) {
                         // Streaming: do NOT trim trailing newlines, otherwise list formatting breaks
@@ -829,6 +838,16 @@ final class ChatViewModel: ObservableObject {
         }
 
         return RuntimeProfile(imageMaxDimension: 768, useOriginalImage: false, imageMaxSlices: 1, batchSize: 768, ubatchSize: 768, imageEvalBatchSize: 768, forceMMProjCPU: false)
+    }
+
+    private func effectiveMaxNewTokens(isGemma4: Bool, isMiniCPMV46: Bool) -> Int32 {
+        if isGemma4 {
+            return settings.gemmaUnlimitedMaxNewTokens ? -1 : settings.gemmaMaxNewTokens
+        }
+        if isMiniCPMV46 {
+            return settings.miniCPMV46UnlimitedMaxNewTokens ? -1 : settings.miniCPMV46MaxNewTokens
+        }
+        return settings.unlimitedMaxNewTokens ? -1 : settings.maxNewTokens
     }
 
 }
